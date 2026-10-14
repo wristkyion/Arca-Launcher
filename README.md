@@ -27,7 +27,7 @@ Arca-Launcher is also my first application developed using this technology stack
 
 Installation
 
-1. Go to the "Releases" (../../releases) page.
+1. Go to the "Releases" page.
 2. Download the latest Arca-Launcher installer for your system.
 3. Run the installer and follow the on-screen instructions.
 4. Launch Arca-Launcher and enjoy!
@@ -48,7 +48,7 @@ Notes
 
 Bug Reports
 
-Found a bug or have a suggestion? Feel free to report it through the project's "Issues" (../../issues) page.
+Found a bug or have a suggestion? Feel free to report it through the project's "Issues" page.
 
 Please include relevant details, steps to reproduce the problem, and error logs when possible. Never share passwords or authentication tokens.
 
