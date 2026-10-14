@@ -1,8 +1,8 @@
-<p align=center>
-<strong>"Arca-Launcher"
-</p>
+<h1 align="center">Arca-Launcher</h1>
 
-A custom Minecraft launcher built with Tauri, Vite, Rust, and TypeScript.
+<p align="center">
+  A custom Minecraft launcher built with Tauri, Vite, Rust, and TypeScript.
+</p>
 
 Arca-Launcher is an indie project focused on creating a personalized and user-friendly Minecraft launcher with its own design and features.
 
