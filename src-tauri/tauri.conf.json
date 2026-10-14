@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Arca Launcher", "width": 760, "height": 920 }],
+    "windows": [{ "title": "Arca Launcher", "width": 920, "height": 590, "resizable": true, "fullscreen": false, "maximized": false }],
     "security": { "csp": null }
   },
   "bundle": {
