@@ -8,6 +8,20 @@ Arca-Launcher is an indie project focused on creating a personalized and user-fr
 
 This project is still in early development, so some features may be incomplete, change over time, or contain bugs.
 
+ <table>
+  <tr>
+    <td width="33%">
+      <img src="screenshot/1.png" width="100%" alt="Arca Launcher screenshot 1">
+    </td>
+    <td width="33%">
+      <img src="screenshot/2.png" width="100%" alt="Arca Launcher screenshot 2">
+    </td>
+    <td width="33%">
+      <img src="screenshot/3.png" width="100%" alt="Arca Launcher screenshot 3">
+    </td>
+  </tr>
+</table>
+
 Features
 
 - Custom Design — A unique interface designed specifically for Arca-Launcher.
