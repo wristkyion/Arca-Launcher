@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Simple Launcher",
+  "productName": "Arca Launcher",
   "version": "0.1.0",
-  "identifier": "com.example.simplelauncher",
+  "identifier": "com.arca.launcher",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Simple Launcher", "width": 520, "height": 760 }],
+    "windows": [{ "title": "Arca Launcher", "width": 760, "height": 920 }],
     "security": { "csp": null }
   },
   "bundle": {

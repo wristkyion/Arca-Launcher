@@ -20,7 +20,7 @@ const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_
 
 pub fn http() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent("simple-tauri-launcher/0.1")
+        .user_agent("arca-tauri-launcher/0.1")
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(15)) // a stalled download errors out, then retries
         .build()
@@ -538,7 +538,7 @@ pub fn launch(app: &AppHandle, dir: &Path, id: &str, v: &Value, acc: &Account, r
     vars.insert("library_directory", s(libs_dir.clone()));
     vars.insert("classpath_separator", SEP.into());
     vars.insert("classpath", cp.join(SEP));
-    vars.insert("launcher_name", "SimpleTauriLauncher".into());
+    vars.insert("launcher_name", "ArcaTauriLauncher".into());
     vars.insert("launcher_version", "0.1.0".into());
     vars.insert("clientid", "".into());
     vars.insert("auth_xuid", "".into());

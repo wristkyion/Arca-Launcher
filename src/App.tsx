@@ -28,7 +28,7 @@ const DEFAULTS: Settings = {
 
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
-  { v: "1.0", title: "Release launcher", items: ["First public release"] },
+  { v: "1.0", title: "Arca Launcher", items: ["First public release"] },
 ];
 
 /** Auto RAM: 3 GB for vanilla, 6 GB for modded, never more than 60% of the machine. */
@@ -541,7 +541,7 @@ function AppInner() {
       <input ref={fileRef} type="file" accept="image/*" onChange={onFile} style={{ display: "none" }} />
       <header className="topbar">
         <div className="logo"><Icon n="cube" /></div>
-        <div className="brand">Simple Launcher</div>
+        <div className="brand">Arca Launcher</div>
         <div className="chips">
           <span className="chip"><i className="dot" />{current ? KIND_LABEL[current.kind] : "No account"}</span>
           <span className="chip">{inst ? `${cap(inst.loader)} ${inst.mc}` : "No instance"}</span>

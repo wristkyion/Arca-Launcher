@@ -1,5 +1,5 @@
 [package]
-name = "tauri-mc-launcher"
+name = "arca-launcher"
 version = "0.1.0"
 edition = "2021"
 
