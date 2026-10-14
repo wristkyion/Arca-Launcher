@@ -27,11 +27,24 @@ Arca-Launcher is also my first application developed using this technology stack
 
 Installation
 
-Installation instructions will be added once the distribution process is ready.
+1. Go to the "Releases" (../../releases) page.
+2. Download the latest Arca-Launcher installer for your system.
+3. Run the installer and follow the on-screen instructions.
+4. Launch Arca-Launcher and enjoy!
 
 Requirements
 
-System requirements and supported platforms will be documented as development progresses.
+- WebView2 Runtime — Required to run Arca-Launcher on Windows.
+
+If WebView2 Runtime is not installed on your system, download and install it from the official Microsoft website:
+
+"Download Microsoft Edge WebView2 Runtime" (https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
+
+Notes
+
+- Make sure to download the correct installer from the Releases page.
+- If the application fails to start, ensure that WebView2 Runtime is installed and up to date.
+- Arca-Launcher is still in early development, so bugs and unexpected behavior may occur.
 
 Bug Reports
 
