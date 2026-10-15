@@ -2,17 +2,21 @@
 
 mod accounts;
 mod auth;
+mod content;
 mod game;
 mod instances;
 mod mods;
-mod content;
 
 use accounts::{Store, Stored};
-use instances::Instance;
 use anyhow::anyhow;
 use base64::Engine;
+use instances::Instance;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use serde_json::Value;
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Emitter};
 
 pub fn emit(app: &AppHandle, msg: impl Into<String>) {
@@ -38,15 +42,357 @@ fn setup_dirs() -> (PathBuf, PathBuf, PathBuf) {
     (game, launcher, config)
 }
 
-/// Uses jre/javaruntime if it contains Java and the user left the field as "java".
-fn pick_java(user: &str) -> String {
+#[tauri::command]
+fn load_settings() -> Result<Value, String> {
+    let (_, _, cfg) = setup_dirs();
+    let mut settings = match std::fs::read_to_string(cfg.join("settings.json")) {
+        Ok(data) => {
+            serde_json::from_str(&data).map_err(|e| format!("Could not parse settings: {e}"))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("Could not read settings: {error}")),
+    };
+    let instance_directory = instance_root()?;
+    settings
+        .as_object_mut()
+        .ok_or_else(|| "Settings must be a JSON object".to_string())?
+        .entry("settings")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Settings preferences must be a JSON object".to_string())?
+        .insert(
+            "instanceDirectory".into(),
+            serde_json::Value::String(instance_directory.to_string_lossy().into_owned()),
+        );
+    Ok(settings)
+}
+
+#[tauri::command]
+fn save_settings(data: Value) -> Result<(), String> {
+    let (_, _, cfg) = setup_dirs();
+    let settings = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("Could not serialize settings: {e}"))?;
+    std::fs::write(cfg.join("settings.json"), settings)
+        .map_err(|e| format!("Could not write settings: {e}"))
+}
+
+pub(crate) fn instance_root() -> Result<PathBuf, String> {
+    let (game, _, cfg) = setup_dirs();
+    let settings_path = cfg.join("settings.json");
+    let data = match std::fs::read_to_string(&settings_path) {
+        Ok(contents) => serde_json::from_str::<Value>(&contents)
+            .map_err(|e| format!("Could not parse settings: {e}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("Could not read settings: {error}")),
+    };
+    let configured = data
+        .get("settings")
+        .and_then(|settings| settings.get("instanceDirectory"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty());
+    let path = configured
+        .map(PathBuf::from)
+        .unwrap_or_else(|| game.join("instances"));
+    if !path.is_absolute() {
+        return Err("The instance folder path must be absolute".into());
+    }
+    Ok(path)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceDirectoryResult {
+    path: String,
+    warning: Option<String>,
+}
+
+fn copy_directory_contents(
+    source: &Path,
+    destination: &Path,
+    created: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for entry in
+        std::fs::read_dir(source).map_err(|e| format!("Could not read instance folder: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Could not read instance folder entry: {e}"))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Could not inspect {}: {e}", source_path.display()))?;
+        if file_type.is_dir() {
+            std::fs::create_dir(&destination_path)
+                .map_err(|e| format!("Could not create {}: {e}", destination_path.display()))?;
+            created.push(destination_path.clone());
+            copy_directory_contents(&source_path, &destination_path, created)?;
+        } else if file_type.is_file() {
+            let mut input = std::fs::File::open(&source_path)
+                .map_err(|e| format!("Could not read {}: {e}", source_path.display()))?;
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination_path)
+                .map_err(|e| format!("Could not create {}: {e}", destination_path.display()))?;
+            created.push(destination_path.clone());
+            std::io::copy(&mut input, &mut output)
+                .map_err(|e| format!("Could not copy {}: {e}", source_path.display()))?;
+        } else {
+            return Err(format!(
+                "Unsupported file type in instance folder: {}",
+                source_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn remove_copied_paths(paths: &[PathBuf]) -> Result<(), String> {
+    for path in paths.iter().rev() {
+        let file_type = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("Could not inspect {}: {error}", path.display())),
+        };
+        if file_type.is_dir() {
+            std::fs::remove_dir_all(path)
+                .map_err(|e| format!("Could not remove {}: {e}", path.display()))?;
+        } else {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not remove {}: {error}", path.display())),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_instance_directory(path: String) -> Result<InstanceDirectoryResult, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("Choose an instance folder first".into());
+    }
+    let requested = PathBuf::from(path);
+    if !requested.is_absolute() {
+        return Err("The instance folder path must be absolute".into());
+    }
+    std::fs::create_dir_all(&requested)
+        .map_err(|e| format!("Could not create instance folder: {e}"))?;
+    let destination = std::fs::canonicalize(&requested)
+        .map_err(|e| format!("Could not resolve instance folder: {e}"))?;
+    let source = instance_root()?;
+    std::fs::create_dir_all(&source)
+        .map_err(|e| format!("Could not create current instance folder: {e}"))?;
+    let source = std::fs::canonicalize(&source)
+        .map_err(|e| format!("Could not resolve current instance folder: {e}"))?;
+    if source == destination {
+        return Ok(InstanceDirectoryResult {
+            path: destination.to_string_lossy().into_owned(),
+            warning: None,
+        });
+    }
+    if source.starts_with(&destination) || destination.starts_with(&source) {
+        return Err(
+            "The new instance folder cannot contain, or be inside, the current instance folder"
+                .into(),
+        );
+    }
+    if std::fs::read_dir(&destination)
+        .map_err(|e| format!("Could not inspect instance folder: {e}"))?
+        .next()
+        .is_some()
+    {
+        return Err("Choose an empty folder so existing instances can be moved safely".into());
+    }
+
+    let (_, _, cfg) = setup_dirs();
+    let settings_path = cfg.join("settings.json");
+    let mut data = match std::fs::read_to_string(&settings_path) {
+        Ok(contents) => serde_json::from_str::<Value>(&contents)
+            .map_err(|e| format!("Could not parse settings: {e}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("Could not read settings: {error}")),
+    };
+    let settings = data
+        .as_object_mut()
+        .ok_or_else(|| "Settings must be a JSON object".to_string())?
+        .entry("settings")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Settings preferences must be a JSON object".to_string())?;
+    settings.insert(
+        "instanceDirectory".into(),
+        serde_json::Value::String(destination.to_string_lossy().into_owned()),
+    );
+    let serialized = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("Could not serialize settings: {e}"))?;
+
+    let mut copied_paths = Vec::new();
+    if let Err(error) = copy_directory_contents(&source, &destination, &mut copied_paths) {
+        let cleanup = remove_copied_paths(&copied_paths).err();
+        return Err(match cleanup {
+            Some(cleanup_error) => format!("{error}; partial copy cleanup failed: {cleanup_error}"),
+            None => error,
+        });
+    }
+
+    if let Err(error) = std::fs::write(&settings_path, serialized) {
+        let cleanup = remove_copied_paths(&copied_paths).err();
+        return Err(match cleanup {
+            Some(cleanup_error) => format!("Could not save instance folder setting: {error}; partial copy cleanup failed: {cleanup_error}"),
+            None => format!("Could not save instance folder setting: {error}"),
+        });
+    }
+
+    let warning = std::fs::remove_dir_all(&source)
+        .err()
+        .map(|e| format!("New folder is active, but old instance files could not be removed: {e}"));
+    Ok(InstanceDirectoryResult {
+        path: destination.to_string_lossy().into_owned(),
+        warning,
+    })
+}
+
+fn java_major_for_minecraft(version: &str) -> u8 {
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| part.parse::<u16>().ok());
+    let Some(first) = parts.next() else {
+        return 21;
+    };
+    if first >= 26 {
+        return 25;
+    }
+    let Some(minor) = parts.next() else {
+        return 21;
+    };
+    let patch = parts.next().unwrap_or_default();
+    if minor > 20 || (minor == 20 && patch >= 5) {
+        21
+    } else if minor >= 18 {
+        17
+    } else if minor == 17 {
+        16
+    } else {
+        8
+    }
+}
+
+fn launcher_java_path(major: u8) -> PathBuf {
+    root_dir()
+        .join("jre")
+        .join("javaruntime")
+        .join(format!("java-{major}"))
+        .join("bin")
+        .join(if cfg!(windows) { "java.exe" } else { "java" })
+}
+
+async fn ensure_launcher_java(app: &AppHandle, mc_version: &str) -> anyhow::Result<PathBuf> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        anyhow::bail!("Launcher-managed Java downloads currently support Windows x64 only.");
+    }
+    let major = java_major_for_minecraft(mc_version);
+    let java_path = launcher_java_path(major);
+    if java_path.is_file() {
+        return Ok(java_path);
+    }
+
+    let runtime_root = root_dir().join("jre").join("javaruntime");
+    std::fs::create_dir_all(&runtime_root)?;
+    let staging = runtime_root.join(format!("java-{major}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir(&staging)?;
+    emit(
+        app,
+        format!("Downloading Java {major} for Minecraft {mc_version}..."),
+    );
+
+    let result = async {
+        let url = format!(
+            "https://api.adoptium.net/v3/binary/latest/{major}/ga/windows/x64/jre/hotspot/normal/eclipse"
+        );
+        let response = game::http().get(url).send().await?.error_for_status()?;
+        let archive_bytes = response.bytes().await?;
+        let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index)?;
+            let Some(relative) = entry.enclosed_name() else {
+                anyhow::bail!("Java archive contains an unsafe path");
+            };
+            let mut components = relative.components();
+            components.next();
+            let relative = components.as_path();
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+            let destination = staging.join(relative);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&destination)?;
+                continue;
+            }
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut output = std::fs::File::create(destination)?;
+            std::io::copy(&mut entry, &mut output)?;
+        }
+
+        let extracted_java = staging.join("bin").join("java.exe");
+        if !extracted_java.is_file() {
+            anyhow::bail!("Downloaded Java archive did not contain bin/java.exe");
+        }
+        let install_dir = runtime_root.join(format!("java-{major}"));
+        match std::fs::rename(&staging, &install_dir) {
+            Ok(()) => {}
+            Err(_error) if install_dir.join("bin").join("java.exe").is_file() => {
+                std::fs::remove_dir_all(&staging)
+                    .map_err(|error| anyhow!("Java is installed, but temporary files could not be removed: {error}"))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        emit(app, format!("Java {major} is ready"));
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        let cleanup = std::fs::remove_dir_all(&staging).err();
+        return Err(match cleanup {
+            Some(cleanup_error) => {
+                anyhow!("{error}; could not clean temporary Java files: {cleanup_error}")
+            }
+            None => error,
+        });
+    }
+    Ok(java_path)
+}
+
+pub(crate) async fn pick_java(
+    app: &AppHandle,
+    user: &str,
+    runtime_mode: &str,
+    mc_version: &str,
+) -> anyhow::Result<String> {
     let user = user.trim();
     if !user.is_empty() && user != "java" {
-        return user.to_string();
+        return Ok(user.to_string());
     }
-    let exe = if cfg!(windows) { "java.exe" } else { "java" };
-    let p = root_dir().join("jre").join("javaruntime").join("bin").join(exe);
-    if p.exists() { p.to_string_lossy().to_string() } else { "java".into() }
+    match runtime_mode {
+        "system" => Ok("java".into()),
+        "launcher" => Ok(ensure_launcher_java(app, mc_version)
+            .await?
+            .to_string_lossy()
+            .into_owned()),
+        other => anyhow::bail!("Unknown Java runtime option: {other}"),
+    }
+}
+
+#[tauri::command]
+async fn download_java_runtime(app: AppHandle, mc_version: String) -> Result<String, String> {
+    ensure_launcher_java(&app, &mc_version)
+        .await
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn new_id() -> String {
@@ -62,9 +408,12 @@ struct ContentReq {
 }
 
 fn instance_dir(id: &str) -> Result<PathBuf, String> {
-    let (dir, _, cfg) = setup_dirs();
-    let inst = instances::load(&cfg).into_iter().find(|i| i.id == id).ok_or("Instance not found")?;
-    Ok(dir.join("instances").join(&inst.id))
+    let (_, _, cfg) = setup_dirs();
+    let inst = instances::load(&cfg)
+        .into_iter()
+        .find(|i| i.id == id)
+        .ok_or("Instance not found")?;
+    Ok(instance_root()?.join(&inst.id))
 }
 
 #[tauri::command]
@@ -82,7 +431,13 @@ struct ToggleContentReq {
 
 #[tauri::command]
 fn toggle_content(req: ToggleContentReq) -> Result<String, String> {
-    content::toggle(&instance_dir(&req.instance)?, &req.kind, &req.file_name, req.enable).map_err(|e| format!("{e:#}"))
+    content::toggle(
+        &instance_dir(&req.instance)?,
+        &req.kind,
+        &req.file_name,
+        req.enable,
+    )
+    .map_err(|e| format!("{e:#}"))
 }
 
 #[derive(Deserialize)]
@@ -94,19 +449,31 @@ struct DeleteContentReq {
 
 #[tauri::command]
 fn delete_content(req: DeleteContentReq) -> Result<(), String> {
-    content::delete(&instance_dir(&req.instance)?, &req.kind, &req.file_name).map_err(|e| format!("{e:#}"))
+    content::delete(&instance_dir(&req.instance)?, &req.kind, &req.file_name)
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 fn open_instance_folder(req: ContentReq) -> Result<(), String> {
-    let folder = content::folder_path(&instance_dir(&req.instance)?, &req.kind).map_err(|e| format!("{e:#}"))?;
-    let _ = std::fs::create_dir_all(&folder);
+    let folder = content::folder_path(&instance_dir(&req.instance)?, &req.kind)
+        .map_err(|e| format!("{e:#}"))?;
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| format!("Could not create content folder: {e}"))?;
     #[cfg(windows)]
-    std::process::Command::new("explorer").arg(&folder).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&folder).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new("open")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(&folder).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new("xdg-open")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -132,7 +499,12 @@ fn view(s: &Store) -> AccountList {
         accounts: s
             .accounts
             .iter()
-            .map(|a| AccountView { id: a.id.clone(), kind: a.kind.clone(), username: a.username.clone(), uuid: a.uuid.clone() })
+            .map(|a| AccountView {
+                id: a.id.clone(),
+                kind: a.kind.clone(),
+                username: a.username.clone(),
+                uuid: a.uuid.clone(),
+            })
             .collect(),
     }
 }
@@ -188,11 +560,20 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
         // instant
         "offline" => {
             let n = req.username.trim();
-            if n.len() < 3 || n.len() > 16 || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            if n.len() < 3
+                || n.len() > 16
+                || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 anyhow::bail!("Username must be 3-16 characters: letters, numbers or _");
             }
             let a = auth::offline(n);
-            Stored { id: new_id(), kind: "offline".into(), username: a.username, uuid: a.uuid, ..Default::default() }
+            Stored {
+                id: new_id(),
+                kind: "offline".into(),
+                username: a.username,
+                uuid: a.uuid,
+                ..Default::default()
+            }
         }
         // password login, then save the token
         "elyby" => {
@@ -200,8 +581,22 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
                 anyhow::bail!("Enter your Ely.by username and password");
             }
             let client_token = new_id();
-            let a = auth::ely_login(&launcher_dir, req.username.trim(), &req.password, &client_token).await?;
-            Stored { id: new_id(), kind: "elyby".into(), username: a.username, uuid: a.uuid, access_token: a.token, client_token, ..Default::default() }
+            let a = auth::ely_login(
+                &launcher_dir,
+                req.username.trim(),
+                &req.password,
+                &client_token,
+            )
+            .await?;
+            Stored {
+                id: new_id(),
+                kind: "elyby".into(),
+                username: a.username,
+                uuid: a.uuid,
+                access_token: a.token,
+                client_token,
+                ..Default::default()
+            }
         }
         // device-code login, then save the refresh token
         "microsoft" => {
@@ -209,17 +604,30 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
                 anyhow::bail!("Enter your Azure client ID first (Settings tab)");
             }
             let (a, rt) = auth::ms_new(&app, req.ms_client_id.trim()).await?;
-            Stored { id: new_id(), kind: "microsoft".into(), username: a.username, uuid: a.uuid, refresh_token: rt, ..Default::default() }
+            Stored {
+                id: new_id(),
+                kind: "microsoft".into(),
+                username: a.username,
+                uuid: a.uuid,
+                refresh_token: rt,
+                ..Default::default()
+            }
         }
         k => anyhow::bail!("Unknown account type {k}"),
     };
 
     // same account added twice -> update it instead of duplicating
-    let pos = store.accounts.iter().position(|x| x.kind == stored.kind && x.uuid == stored.uuid);
+    let pos = store
+        .accounts
+        .iter()
+        .position(|x| x.kind == stored.kind && x.uuid == stored.uuid);
     let id = match pos {
         Some(i) => {
             let id = store.accounts[i].id.clone();
-            store.accounts[i] = Stored { id: id.clone(), ..stored };
+            store.accounts[i] = Stored {
+                id: id.clone(),
+                ..stored
+            };
             id
         }
         None => {
@@ -252,14 +660,22 @@ async fn fetch_skin(kind: &str, username: &str, uuid: &str) -> anyhow::Result<Op
     let c = game::http();
     let textures: serde_json::Value = match kind {
         "elyby" => {
-            let r = c.get(format!("https://skinsystem.ely.by/textures/{username}")).send().await?;
+            let r = c
+                .get(format!("https://skinsystem.ely.by/textures/{username}"))
+                .send()
+                .await?;
             if !r.status().is_success() {
                 return Ok(None);
             }
             r.json().await?
         }
         "microsoft" => {
-            let r = c.get(format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}")).send().await?;
+            let r = c
+                .get(format!(
+                    "https://sessionserver.mojang.com/session/minecraft/profile/{uuid}"
+                ))
+                .send()
+                .await?;
             if !r.status().is_success() {
                 return Ok(None);
             }
@@ -275,11 +691,26 @@ async fn fetch_skin(kind: &str, username: &str, uuid: &str) -> anyhow::Result<Op
         _ => return Ok(None),
     };
     let skin = &textures["SKIN"];
-    let Some(url) = skin["url"].as_str() else { return Ok(None) };
+    let Some(url) = skin["url"].as_str() else {
+        return Ok(None);
+    };
     let url = url.replacen("http://", "https://", 1);
-    let png = c.get(&url).send().await?.error_for_status()?.bytes().await?;
-    let data = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png));
-    Ok(Some(Skin { url, slim: skin["metadata"]["model"] == "slim", data }))
+    let png = c
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let data = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&png)
+    );
+    Ok(Some(Skin {
+        url,
+        slim: skin["metadata"]["model"] == "slim",
+        data,
+    }))
 }
 
 // ------------------------------------------------------------ playing
@@ -289,11 +720,17 @@ struct PlayReq {
     instance: String,
     ram: u32,
     java: String,
+    #[serde(default = "default_java_runtime")]
+    java_mode: String,
     ms_client_id: String,
     jvm_args: String,
     game_args: String,
     hide: String,
     volume: Option<u32>,
+}
+
+fn default_java_runtime() -> String {
+    "system".into()
 }
 
 /// Splits "-Dfoo=bar --name "my name"" into arguments (double quotes group words).
@@ -351,28 +788,47 @@ async fn play(app: AppHandle, req: PlayReq) -> Result<(), String> {
 async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
     let (dir, launcher_dir, cfg) = setup_dirs();
     let c = game::http();
-    let java = pick_java(&req.java);
 
     // 0. The instance to launch
     let rec = instances::load(&cfg)
         .into_iter()
         .find(|i| i.id == req.instance)
         .ok_or_else(|| anyhow!("Select an instance first"))?;
+    let java = pick_java(&app, &req.java, &req.java_mode, &rec.mc).await?;
     let id = rec.version_id.clone();
-    if !dir.join("versions").join(&id).join(format!("{id}.json")).exists() {
+    if !dir
+        .join("versions")
+        .join(&id)
+        .join(format!("{id}.json"))
+        .exists()
+    {
         anyhow::bail!("The files for this instance are missing. Delete it and download it again.");
     }
 
     // 1. Use the selected saved account (refreshing its token if needed)
     emit(&app, "Logging in...");
     let mut store = accounts::load(&cfg);
-    let sel = store.selected.clone().ok_or_else(|| anyhow!("Add an account first (Account tab)"))?;
-    let idx = store.accounts.iter().position(|a| a.id == sel).ok_or_else(|| anyhow!("Selected account not found"))?;
+    let sel = store
+        .selected
+        .clone()
+        .ok_or_else(|| anyhow!("Add an account first (Account tab)"))?;
+    let idx = store
+        .accounts
+        .iter()
+        .position(|a| a.id == sel)
+        .ok_or_else(|| anyhow!("Selected account not found"))?;
     let saved = store.accounts[idx].clone();
     let account = match saved.kind.as_str() {
         "offline" => auth::offline(&saved.username),
         "elyby" => {
-            let a = auth::ely_session(&launcher_dir, &saved.username, &saved.uuid, &saved.access_token, &saved.client_token).await?;
+            let a = auth::ely_session(
+                &launcher_dir,
+                &saved.username,
+                &saved.uuid,
+                &saved.access_token,
+                &saved.client_token,
+            )
+            .await?;
             store.accounts[idx].access_token = a.token.clone();
             a
         }
@@ -392,7 +848,9 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
 
     // 2. Make sure libraries and assets are all there (already-downloaded files are skipped)
     let v = game::resolve(&dir, &id)?;
-    let inst = dir.join("instances").join(&rec.id);
+    let inst = instance_root()
+        .map_err(|error| anyhow!(error))?
+        .join(&rec.id);
     game::prepare_instance(&inst)?;
     game::install_deps(&app, &c, &dir, &id, &v, &inst).await?;
 
@@ -419,13 +877,42 @@ fn slug(name: &str) -> String {
         }
     }
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() { "instance".into() } else { s }
+    if s.is_empty() {
+        "instance".into()
+    } else {
+        s
+    }
 }
 
 #[tauri::command]
-fn list_instances() -> Vec<Instance> {
+fn list_instances() -> Result<Vec<Instance>, String> {
     let (_, _, cfg) = setup_dirs();
-    instances::load(&cfg)
+    let root = instance_root()?;
+    let mut list = instances::load(&cfg);
+    let mut migrated = false;
+    for instance in &mut list {
+        if instance.background.starts_with("data:image/") {
+            let path = root.join(&instance.id);
+            instance.background = instances::save_background(&path, &instance.background)?;
+            migrated = true;
+        }
+    }
+    if migrated {
+        instances::save(&cfg, &list)?;
+    }
+    Ok(list)
+}
+
+#[tauri::command]
+fn load_instance_background(id: String) -> Result<Option<String>, String> {
+    let (_, _, cfg) = setup_dirs();
+    let root = instance_root()?;
+    let instance = instances::load(&cfg)
+        .into_iter()
+        .find(|instance| instance.id == id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+    let path = root.join(&instance.id);
+    instances::read_background(&path, &instance.background)
 }
 
 #[tauri::command]
@@ -439,6 +926,8 @@ struct CreateReq {
     loader: String,
     mc: String,
     java: String,
+    #[serde(default = "default_java_runtime")]
+    java_mode: String,
     icon: String,
     description: String,
     background: String,
@@ -455,8 +944,9 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
         anyhow::bail!("Give the instance a name");
     }
     let (dir, _, cfg) = setup_dirs();
+    let instance_root = instance_root().map_err(|error| anyhow!(error))?;
     let c = game::http();
-    let java = pick_java(&req.java);
+    let java = pick_java(&app, &req.java, &req.java_mode, &req.mc).await?;
 
     emit(&app, "Creating instance...");
     game::install_vanilla(&app, &c, &dir, &req.mc).await?;
@@ -467,16 +957,26 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
     let base = slug(&name);
     let mut id = base.clone();
     let mut n = 2;
-    while list.iter().any(|i| i.id == id) || dir.join("instances").join(&id).exists() {
+    while list.iter().any(|i| i.id == id) || instance_root.join(&id).exists() {
         id = format!("{base}-{n}");
         n += 1;
     }
-    let inst = dir.join("instances").join(&id);
+    let inst = instance_root.join(&id);
     game::install_deps(&app, &c, &dir, &version_id, &v, &inst).await?;
     game::prepare_instance(&inst)?;
 
-    list.push(Instance { id, name, loader: req.loader, mc: req.mc, version_id, icon: req.icon, description: req.description, background: req.background });
-    instances::save(&cfg, &list);
+    let background = instances::save_background(&inst, &req.background).map_err(|e| anyhow!(e))?;
+    list.push(Instance {
+        id,
+        name,
+        loader: req.loader,
+        mc: req.mc,
+        version_id,
+        icon: req.icon,
+        description: req.description,
+        background,
+    });
+    instances::save(&cfg, &list).map_err(|e| anyhow!(e))?;
     emit(&app, "Instance ready");
     Ok(list)
 }
@@ -493,17 +993,27 @@ struct EditReq {
 #[tauri::command]
 fn edit_instance(req: EditReq) -> Result<Vec<Instance>, String> {
     let (_, _, cfg) = setup_dirs();
+    let instance_root = instance_root()?;
     let mut list = instances::load(&cfg);
     let name = req.name.trim();
     if name.is_empty() {
         return Err("The name can't be empty".into());
     }
-    let i = list.iter_mut().find(|i| i.id == req.id).ok_or("Instance not found")?;
+    let instance_id = list
+        .iter()
+        .find(|i| i.id == req.id)
+        .map(|i| i.id.clone())
+        .ok_or("Instance not found")?;
+    let background = instances::save_background(&instance_root.join(instance_id), &req.background)?;
+    let i = list
+        .iter_mut()
+        .find(|i| i.id == req.id)
+        .ok_or("Instance not found")?;
     i.name = name.to_string();
     i.icon = req.icon;
     i.description = req.description;
-    i.background = req.background;
-    instances::save(&cfg, &list);
+    i.background = background;
+    instances::save(&cfg, &list)?;
     Ok(list)
 }
 
@@ -515,23 +1025,53 @@ struct RemoveReq {
 
 #[tauri::command]
 fn remove_instance(req: RemoveReq) -> Result<Vec<Instance>, String> {
-    let (dir, _, cfg) = setup_dirs();
+    let (_, _, cfg) = setup_dirs();
     let mut list = instances::load(&cfg);
     if req.delete_files && list.iter().any(|i| i.id == req.id) {
-        let _ = std::fs::remove_dir_all(dir.join("instances").join(&req.id));
+        let path = instance_root()?.join(&req.id);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Could not delete instance files: {error}")),
+        }
     }
     list.retain(|i| i.id != req.id);
-    instances::save(&cfg, &list);
+    instances::save(&cfg, &list)?;
     Ok(list)
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-        mc_versions, system_ram, play, list_instances, loader_support, create_instance, edit_instance, remove_instance,
-        list_accounts, add_account, remove_account, select_account, get_skin,
-        mods::mod_search, mods::mod_versions, mods::mod_install, mods::modpack_install,
-        list_content, toggle_content, delete_content, open_instance_folder])
+            mc_versions,
+            system_ram,
+            play,
+            list_instances,
+            load_instance_background,
+            loader_support,
+            create_instance,
+            edit_instance,
+            remove_instance,
+            list_accounts,
+            add_account,
+            remove_account,
+            select_account,
+            get_skin,
+            mods::mod_search,
+            mods::mod_versions,
+            mods::mod_install,
+            mods::content_install,
+            mods::modpack_install,
+            list_content,
+            toggle_content,
+            delete_content,
+            open_instance_folder,
+            load_settings,
+            save_settings,
+            set_instance_directory,
+            download_java_runtime
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

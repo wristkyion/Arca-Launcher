@@ -39,23 +39,39 @@ fn safe_file(name: &str) -> Result<()> {
 pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
     let folder = folder_path(inst_dir, kind)?;
     let mut out = vec![];
-    let Ok(rd) = fs::read_dir(&folder) else { return Ok(out) };
-    for entry in rd.flatten() {
+    let rd = match fs::read_dir(&folder) {
+        Ok(rd) => rd,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in rd {
+        let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
         let file_name = entry.file_name().to_string_lossy().to_string();
         let lower = file_name.to_lowercase();
-        let is_pack = kind != "mods" && (lower.ends_with(".zip") || lower.ends_with(".zip.disabled"));
-        let is_mod = kind == "mods" && (lower.ends_with(".jar") || lower.ends_with(".jar.disabled"));
+        let is_pack =
+            kind != "mods" && (lower.ends_with(".zip") || lower.ends_with(".zip.disabled"));
+        let is_mod =
+            kind == "mods" && (lower.ends_with(".jar") || lower.ends_with(".jar.disabled"));
         if !is_pack && !is_mod {
             continue; // skip stray files like .DS_Store, config leftovers, etc.
         }
         let enabled = !lower.ends_with(".disabled");
-        let name = if enabled { file_name.clone() } else { file_name.trim_end_matches(".disabled").to_string() };
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        out.push(ContentItem { name, file_name, enabled, size });
+        let name = if enabled {
+            file_name.clone()
+        } else {
+            file_name.trim_end_matches(".disabled").to_string()
+        };
+        let size = entry.metadata()?.len();
+        out.push(ContentItem {
+            name,
+            file_name,
+            enabled,
+            size,
+        });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
@@ -86,5 +102,6 @@ pub fn toggle(inst_dir: &Path, kind: &str, file_name: &str, enable: bool) -> Res
 pub fn delete(inst_dir: &Path, kind: &str, file_name: &str) -> Result<()> {
     safe_file(file_name)?;
     let folder = folder_path(inst_dir, kind)?;
-    fs::remove_file(folder.join(file_name)).map_err(|e| anyhow!("Could not delete {file_name}: {e}"))
+    fs::remove_file(folder.join(file_name))
+        .map_err(|e| anyhow!("Could not delete {file_name}: {e}"))
 }

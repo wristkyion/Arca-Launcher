@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useDownloads } from "./downloads";
+import { taskKey, useDownloads } from "./downloads";
 
 export type Inst = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string };
 type Hit = { id: string; title: string; summary: string; icon: string; downloads: number; author: string; url: string };
@@ -11,19 +11,22 @@ type Props = {
   inst: Inst | null;
   cfKey: string;
   java: string;
+  javaMode: "system" | "launcher";
   onPackInstalled: (list: Inst[]) => void;
   goSettings: () => void;
+  active: boolean;
 };
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmt = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n));
 const chLabel = (ch: string) => (ch === "release" ? "Release" : ch === "beta" ? "Beta" : ch === "alpha" ? "Alpha" : cap(ch));
 
-export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSettings }: Props) {
-  const { tasks, done, install } = useDownloads();
+export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled, goSettings, active }: Props) {
+  const { tasks, done, install, refreshInstalled } = useDownloads();
 
   const [source, setSource] = useState<"modrinth" | "curseforge">("modrinth");
-  const [kind, setKind] = useState<"mod" | "modpack">("mod");
+  const [kind, setKind] = useState<"mod" | "modpack" | "resourcepack" | "shader">("mod");
+  const [sort, setSort] = useState<"relevance" | "downloads" | "updated">("relevance");
   const [query, setQuery] = useState("");
   const [onlyCompat, setOnlyCompat] = useState(true);
   const [hits, setHits] = useState<Hit[]>([]);
@@ -46,7 +49,7 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
 
   const canMods = !!inst && inst.loader !== "vanilla";
   const needKey = source === "curseforge" && !cfKey.trim();
-  const filterMc = kind === "mod" && onlyCompat && inst ? inst.mc : "";
+  const filterMc = kind !== "modpack" && onlyCompat && inst ? inst.mc : "";
   const filterLoader = kind === "mod" && onlyCompat && canMods ? inst!.loader : "";
 
   const search = async (offset: number, append: boolean) => {
@@ -56,7 +59,7 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
     setErr("");
     try {
       const r = await invoke<Res>("mod_search", {
-        req: { source, kind, query, mc: filterMc, loader: filterLoader, offset, cf_key: cfKey },
+        req: { source, kind, query, sort, mc: filterMc, loader: filterLoader, offset, cf_key: cfKey },
       });
       if (id !== reqId.current) return;
       setHits((prev) => (append ? [...prev, ...r.hits] : r.hits));
@@ -72,7 +75,16 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
     const t = setTimeout(() => search(0, false), 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, kind, query, onlyCompat, inst?.id, cfKey]);
+  }, [source, kind, query, sort, onlyCompat, inst?.id, cfKey]);
+
+  useEffect(() => {
+    if (!active || !inst || kind === "modpack") return;
+    let activeRequest = true;
+    refreshInstalled(inst.id, kind).catch((e) => {
+      if (activeRequest) setErr(`Could not refresh installed ${kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"}: ${e}`);
+    });
+    return () => { activeRequest = false; };
+  }, [active, inst?.id, kind, refreshInstalled]);
 
   useEffect(() => {
     if (!picker || verMode !== "pick") return;
@@ -85,13 +97,13 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
       .finally(() => { if (id === verReqId.current) setVerLoading(false); });
   }, [picker, verMode, source, cfKey]);
 
-  const keyOf = (h: Hit) => `${source}:${h.id}`;
+  const keyOf = (h: Hit) => taskKey(kind === "modpack" ? undefined : inst?.id, source, h.id, kind);
   const taskFor = (h: Hit) => tasks.find((t) => t.key === keyOf(h));
 
   const doInstall = (h: Hit) => {
     install({
       source, kind, id: h.id, title: h.title, icon: h.icon,
-      instanceId: inst?.id, java, cfKey, onPackInstalled,
+      instanceId: inst?.id, java, javaMode, cfKey, onPackInstalled,
     });
   };
 
@@ -103,39 +115,63 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
   const confirmInstall = () => {
     if (!picker) return;
     install({
-      source, kind: "mod", id: picker.id, title: picker.title, icon: picker.icon,
-      instanceId: inst?.id, java, cfKey, onPackInstalled,
+      source, kind, id: picker.id, title: picker.title, icon: picker.icon,
+      instanceId: inst?.id, java, javaMode, cfKey, onPackInstalled,
       versionId: verMode === "pick" ? (verChosen ?? undefined) : undefined,
     });
+    closePicker();
   };
 
   const toggle = (key: string) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
 
   return (
-    <section className="panel">
-      <div className="ptop">
-        <h2>Mods</h2>
-        <div className="seg">
+    <section className="panel mods-panel">
+      <header className="mods-heading">
+        <div>
+          <span className="mods-eyebrow">DISCOVER & INSTALL</span>
+          <h2>Downloader</h2>
+          <p>{inst ? `${inst.name} · Minecraft ${inst.mc} · ${cap(inst.loader)}` : "Browse content from Modrinth and CurseForge"}</p>
+        </div>
+        <div className="mods-sources" aria-label="Content source">
           <button className={source === "modrinth" ? "on" : ""} onClick={() => setSource("modrinth")}>Modrinth</button>
           <button className={source === "curseforge" ? "on" : ""} onClick={() => setSource("curseforge")}>CurseForge</button>
         </div>
+      </header>
+      <div className="mods-toolbar">
+        <div className="mods-types" aria-label="Content type">
+          <button className={kind === "mod" ? "on" : ""} onClick={() => setKind("mod")}>Mods</button>
+          <button className={kind === "modpack" ? "on" : ""} onClick={() => setKind("modpack")}>Modpacks</button>
+          <button className={kind === "resourcepack" ? "on" : ""} onClick={() => setKind("resourcepack")}>Resource Packs</button>
+          <button className={kind === "shader" ? "on" : ""} onClick={() => setKind("shader")}>Shader Packs</button>
+        </div>
+        <label className="mods-sort">
+          <span>Sort by</span>
+          <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+            <option value="relevance">Relevance</option>
+            <option value="downloads">Most downloaded</option>
+            <option value="updated">Recently updated</option>
+          </select>
+        </label>
       </div>
-      <div className="seg">
-        <button className={kind === "mod" ? "on" : ""} onClick={() => setKind("mod")}>Mods</button>
-        <button className={kind === "modpack" ? "on" : ""} onClick={() => setKind("modpack")}>Modpacks</button>
+      <div className="mods-searchwrap">
+        <span aria-hidden="true">⌕</span>
+        <input className="mods-search" placeholder={`Search ${kind === "shader" ? "shader packs" : kind === "resourcepack" ? "resource packs" : kind === "modpack" ? "modpacks" : "mods"} by name or keyword...`} value={query} onChange={(e) => setQuery(e.target.value)} />
+        {query && <button className="mini" onClick={() => setQuery("")}>Clear</button>}
       </div>
-      <input placeholder={kind === "mod" ? "Search mods..." : "Search modpacks..."} value={query} onChange={(e) => setQuery(e.target.value)} />
 
-      {kind === "mod" && (
-        <label className="check">
+      {kind !== "modpack" && (
+        <label className="check mods-compat">
           <input type="checkbox" checked={onlyCompat} onChange={(e) => setOnlyCompat(e.target.checked)} />
-          Only show mods for {inst ? `${inst.name} (Minecraft ${inst.mc} · ${cap(inst.loader)})` : "the selected instance"}
+          Only show {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"} for {inst ? `${inst.name} (Minecraft ${inst.mc}${kind === "mod" ? ` · ${cap(inst.loader)}` : ""})` : "the selected instance"}
         </label>
       )}
       {kind === "mod" && !canMods && (
         <div className="err">Select a Fabric, Quilt, Forge or NeoForge instance on the Home page first. Vanilla instances can't use mods.</div>
       )}
       {kind === "modpack" && <p className="hint">Installing a modpack creates a new instance with its own folder.</p>}
+      {kind !== "modpack" && !inst && (
+        <div className="err">Select an instance on the Home page before installing {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"}.</div>
+      )}
       {needKey && (
         <div className="err">
           CurseForge needs a free API key. Get one at console.curseforge.com and paste it in Settings.{" "}
@@ -144,17 +180,18 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
       )}
       {err && <div className="err">{err}</div>}
 
+      <div className="mods-results">
+        <span>{loading ? "Searching..." : `${total.toLocaleString()} results`}</span>
+        {loading && <span className="mods-searching"><i /> Updating results</span>}
+      </div>
       <div className="mgrid">
         {hits.map((h) => {
           const key = keyOf(h);
           const t = taskFor(h);
-          // `tasks` only holds recent/running items (the tray auto-clears finished ones after a
-          // few seconds) — `done` is the permanent record of what's actually been installed this
-          // session, so that's the real source of truth for the "Installed" badge.
           const isRunning = t?.phase === "running";
           const isError = t?.phase === "error";
           const files = done[key];
-          const isInstalled = !isRunning && !isError && kind === "mod" && !!files && files.length > 0;
+          const isInstalled = !isRunning && !isError && kind !== "modpack" && !!files && files.length > 0;
           const isOpen = !!expanded[key];
           const root = files?.find((f) => !f.dependency) ?? files?.[0];
           const deps = files?.filter((f) => f.dependency) ?? [];
@@ -206,9 +243,9 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
                     {" "}{isOpen ? "▾" : "▸"}
                   </button>
                 ) : (
-                  <button className="mini" disabled={kind === "mod" && !canMods}
-                    onClick={() => (kind === "mod" ? openPicker(h) : doInstall(h))}>
-                    {kind === "mod" ? "Install" : "Install pack"}
+                  <button className="mini" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst)}
+                    onClick={() => (kind === "modpack" ? doInstall(h) : openPicker(h))}>
+                    {kind === "modpack" ? "Install pack" : "Install"}
                   </button>
                 )}
               </div>
@@ -218,55 +255,21 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
       </div>
 
       {!loading && hits.length === 0 && !err && !needKey && <p className="hint">No results.</p>}
-      {loading && <p className="hint">Searching...</p>}
       {!loading && hits.length > 0 && hits.length < total && (
         <button className="mini loadmore" onClick={() => search(hits.length, true)}>Load more</button>
       )}
 
       {picker && (() => {
-        const key = keyOf(picker);
-        const t = tasks.find((x) => x.key === key);
         return (
           <>
-            <div className="scrim popfade" onClick={t?.phase === "running" ? undefined : closePicker} />
+            <div className="scrim popfade" onClick={closePicker} />
             <div className="verpicker pop">
               <div className="vpicktop">
                 <img className="micon" src={picker.icon} width={40} height={40} alt=""
                   onError={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = "hidden")} />
                 <b>{picker.title}</b>
-                {t?.phase !== "running" && <button className="mini" onClick={closePicker}>✕</button>}
+                <button className="mini" onClick={closePicker}>✕</button>
               </div>
-
-              {t?.phase === "running" && (
-                <div className="dl">
-                  <p className="hint">{t.detail}</p>
-                  <div className={"pbar" + (t.pct == null ? " indeterminate" : "")}>
-                    <span style={t.pct != null ? { width: `${t.pct}%` } : undefined} />
-                  </div>
-                </div>
-              )}
-
-              {t?.phase === "done" && (
-                <div className="dl">
-                  <h3>Installed</h3>
-                  <p className="hint">{t.detail}</p>
-                  <div className="btnrow">
-                    <button className="btn purple addbtn" onClick={closePicker}>Done</button>
-                  </div>
-                </div>
-              )}
-
-              {t?.phase === "error" && (
-                <div className="dl">
-                  <div className="err">{t.detail}</div>
-                  <div className="btnrow">
-                    <button className="mini" onClick={confirmInstall}>Retry</button>
-                    <button className="mini" onClick={closePicker}>Close</button>
-                  </div>
-                </div>
-              )}
-
-              {!t && (<>
                 <div className="seg">
                   <button className={verMode === "latest" ? "on" : ""} onClick={() => setVerMode("latest")}>Latest compatible</button>
                   <button className={verMode === "pick" ? "on" : ""} onClick={() => setVerMode("pick")}>Choose a version</button>
@@ -320,11 +323,10 @@ export default function ModsPage({ inst, cfKey, java, onPackInstalled, goSetting
 
                 <div className="btnrow">
                   <button className="mini" onClick={closePicker}>Cancel</button>
-                  <button className="btn purple addbtn" disabled={!canMods || (verMode === "pick" && !verChosen)} onClick={confirmInstall}>
+                  <button className="btn purple addbtn" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst) || (verMode === "pick" && !verChosen)} onClick={confirmInstall}>
                     Download
                   </button>
                 </div>
-              </>)}
             </div>
           </>
         );

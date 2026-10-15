@@ -1,4 +1,4 @@
-//! Mod and modpack downloads from Modrinth and CurseForge.
+//! Minecraft content downloads from Modrinth and CurseForge.
 use crate::{emit, game, instances, instances::Instance};
 use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
@@ -21,7 +21,12 @@ const CF: &str = "https://api.curseforge.com/v1";
 
 // ------------------------------------------------------------ helpers
 
-async fn jget(c: &reqwest::Client, url: &str, q: &[(&str, String)], key: Option<&str>) -> Result<Value> {
+async fn jget(
+    c: &reqwest::Client,
+    url: &str,
+    q: &[(&str, String)],
+    key: Option<&str>,
+) -> Result<Value> {
     let mut r = c.get(url).query(q);
     if let Some(k) = key {
         r = r.header("x-api-key", k);
@@ -30,7 +35,9 @@ async fn jget(c: &reqwest::Client, url: &str, q: &[(&str, String)], key: Option<
     let status = resp.status();
     if !status.is_success() {
         if status.as_u16() == 403 && key.is_some() {
-            return Err(anyhow!("CurseForge rejected the API key (403). Check the key in Settings."));
+            return Err(anyhow!(
+                "CurseForge rejected the API key (403). Check the key in Settings."
+            ));
         }
         return Err(anyhow!("Server answered {status} for {url}"));
     }
@@ -55,12 +62,15 @@ fn safe_rel(s: &str) -> Result<PathBuf> {
 }
 
 fn find_instance(id: &str) -> Result<(PathBuf, Instance)> {
-    let (dir, _, cfg) = crate::setup_dirs();
+    let (_, _, cfg) = crate::setup_dirs();
     let inst = instances::load(&cfg)
         .into_iter()
         .find(|i| i.id == id)
         .ok_or_else(|| anyhow!("Instance not found"))?;
-    Ok((dir, inst))
+    let instance_dir = crate::instance_root()
+        .map_err(|error| anyhow!("{error}"))?
+        .join(&inst.id);
+    Ok((instance_dir, inst))
 }
 
 fn cf_loader(l: &str) -> Option<u32> {
@@ -75,7 +85,9 @@ fn cf_loader(l: &str) -> Option<u32> {
 
 fn need_key(key: &str) -> Result<()> {
     if key.trim().is_empty() {
-        Err(anyhow!("Add your CurseForge API key in Settings (free at console.curseforge.com)."))
+        Err(anyhow!(
+            "Add your CurseForge API key in Settings (free at console.curseforge.com)."
+        ))
     } else {
         Ok(())
     }
@@ -84,8 +96,14 @@ fn need_key(key: &str) -> Result<()> {
 /// Newest release file (falls back to newest of any type).
 fn cf_best(arr: &[Value]) -> &Value {
     let rel: Vec<&Value> = arr.iter().filter(|f| f["releaseType"] == 1).collect();
-    let pool: Vec<&Value> = if rel.is_empty() { arr.iter().collect() } else { rel };
-    pool.into_iter().max_by(|a, b| a["fileDate"].as_str().cmp(&b["fileDate"].as_str())).unwrap()
+    let pool: Vec<&Value> = if rel.is_empty() {
+        arr.iter().collect()
+    } else {
+        rel
+    };
+    pool.into_iter()
+        .max_by(|a, b| a["fileDate"].as_str().cmp(&b["fileDate"].as_str()))
+        .unwrap()
 }
 
 /// (download url, file name). Some mods hide downloadUrl; the CDN path still works for most.
@@ -95,7 +113,12 @@ fn cf_url(f: &Value) -> Option<(String, String)> {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
             let id = f["id"].as_u64()?;
-            format!("https://edge.forgecdn.net/files/{}/{}/{}", id / 1000, id % 1000, name)
+            format!(
+                "https://edge.forgecdn.net/files/{}/{}/{}",
+                id / 1000,
+                id % 1000,
+                name
+            )
         }
     };
     Some((url, name.to_string()))
@@ -148,17 +171,29 @@ pub struct SearchResult {
 #[derive(Deserialize)]
 pub struct SearchReq {
     pub source: String, // modrinth | curseforge
-    pub kind: String,   // mod | modpack
+    pub kind: String,   // mod | modpack | resourcepack | shader
     pub query: String,
+    #[serde(default = "default_sort")]
+    pub sort: String, // relevance | downloads | updated
     pub mc: String,     // "" = any
     pub loader: String, // "" = any
     pub offset: u32,
     pub cf_key: String,
 }
 
+fn default_sort() -> String {
+    "relevance".into()
+}
+
 #[tauri::command]
 pub async fn mod_search(req: SearchReq) -> Result<SearchResult, String> {
     let c = game::http();
+    if !matches!(
+        req.kind.as_str(),
+        "mod" | "modpack" | "resourcepack" | "shader"
+    ) {
+        return Err(format!("Unknown content kind {}", req.kind));
+    }
     let r = match req.source.as_str() {
         "modrinth" => mr_search(&c, &req).await,
         "curseforge" => cf_search(&c, &req).await,
@@ -175,7 +210,11 @@ async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
     if !r.loader.is_empty() {
         facets.push(json!([format!("categories:{}", r.loader)]));
     }
-    let index = if r.query.is_empty() { "downloads" } else { "relevance" };
+    let index = match r.sort.as_str() {
+        "downloads" => "downloads",
+        "updated" => "updated",
+        _ => "relevance",
+    };
     let q = vec![
         ("query", r.query.clone()),
         ("facets", Value::Array(facets).to_string()),
@@ -195,24 +234,46 @@ async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
             icon: h["icon_url"].as_str().unwrap_or("").into(),
             downloads: h["downloads"].as_u64().unwrap_or(0),
             author: h["author"].as_str().unwrap_or("").into(),
-            url: format!("https://modrinth.com/{}/{}", h["project_type"].as_str().unwrap_or("mod"), h["slug"].as_str().unwrap_or("")),
+            url: format!(
+                "https://modrinth.com/{}/{}",
+                h["project_type"].as_str().unwrap_or("mod"),
+                h["slug"].as_str().unwrap_or("")
+            ),
         })
         .collect();
-    Ok(SearchResult { hits, total: v["total_hits"].as_u64().unwrap_or(0) })
+    Ok(SearchResult {
+        hits,
+        total: v["total_hits"].as_u64().unwrap_or(0),
+    })
 }
 
 async fn cf_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
     need_key(&r.cf_key)?;
-    let class = if r.kind == "modpack" { 4471 } else { 6 };
+    let class = match r.kind.as_str() {
+        "mod" => 6,
+        "modpack" => 4471,
+        "resourcepack" => 12,
+        "shader" => 6552,
+        other => return Err(anyhow!("Unknown content kind {other}")),
+    };
     let mut q = vec![
         ("gameId", "432".to_string()),
         ("classId", class.to_string()),
         ("searchFilter", r.query.clone()),
-        ("sortField", "2".to_string()), // popularity
-        ("sortOrder", "desc".to_string()),
         ("pageSize", "20".to_string()),
         ("index", r.offset.to_string()),
     ];
+    match r.sort.as_str() {
+        "downloads" => {
+            q.push(("sortField", "6".to_string()));
+            q.push(("sortOrder", "desc".to_string()));
+        }
+        "updated" => {
+            q.push(("sortField", "3".to_string()));
+            q.push(("sortOrder", "desc".to_string()));
+        }
+        _ => {}
+    }
     if !r.mc.is_empty() {
         q.push(("gameVersion", r.mc.clone()));
     }
@@ -234,16 +295,19 @@ async fn cf_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
             url: h["links"]["websiteUrl"].as_str().unwrap_or("").into(),
         })
         .collect();
-    Ok(SearchResult { hits, total: v["pagination"]["totalCount"].as_u64().unwrap_or(0) })
+    Ok(SearchResult {
+        hits,
+        total: v["pagination"]["totalCount"].as_u64().unwrap_or(0),
+    })
 }
 
 // ------------------------------------------------------------ browsing a project's versions
 
 #[derive(Serialize)]
 pub struct VersionHit {
-    pub id: String,              // Modrinth version id / CurseForge file id
-    pub name: String,            // version number or display name
-    pub channel: String,         // "release" | "beta" | "alpha"
+    pub id: String,      // Modrinth version id / CurseForge file id
+    pub name: String,    // version number or display name
+    pub channel: String, // "release" | "beta" | "alpha"
     pub game_versions: Vec<String>,
     pub date: String,
 }
@@ -273,14 +337,25 @@ async fn versions(req: VersionsReq) -> Result<Vec<VersionHit>> {
                     id: v["id"].as_str().unwrap_or("").into(),
                     name: v["version_number"].as_str().unwrap_or("").into(),
                     channel: v["version_type"].as_str().unwrap_or("release").into(),
-                    game_versions: v["game_versions"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect(),
+                    game_versions: v["game_versions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect(),
                     date: v["date_published"].as_str().unwrap_or("").into(),
                 })
                 .collect())
         }
         "curseforge" => {
             need_key(&req.cf_key)?;
-            let v = jget(&c, &format!("{CF}/mods/{}/files", req.id), &[("pageSize", "50".to_string())], Some(req.cf_key.trim())).await?;
+            let v = jget(
+                &c,
+                &format!("{CF}/mods/{}/files", req.id),
+                &[("pageSize", "50".to_string())],
+                Some(req.cf_key.trim()),
+            )
+            .await?;
             Ok(v["data"]
                 .as_array()
                 .into_iter()
@@ -289,7 +364,12 @@ async fn versions(req: VersionsReq) -> Result<Vec<VersionHit>> {
                     id: f["id"].as_u64().unwrap_or(0).to_string(),
                     name: f["displayName"].as_str().unwrap_or("").into(),
                     channel: cf_channel(f["releaseType"].as_i64().unwrap_or(1)).into(),
-                    game_versions: f["gameVersions"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect(),
+                    game_versions: f["gameVersions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect(),
                     date: f["fileDate"].as_str().unwrap_or("").into(),
                 })
                 .collect())
@@ -316,8 +396,7 @@ pub struct InstallReq {
     pub version_id: Option<String>,
 }
 
-/// One file written into the mods folder, with what version/channel it was and whether it
-/// was the mod the person actually clicked Install on, or something pulled in as a dependency.
+/// One installed content file, with its version/channel and whether it was pulled in as a dependency.
 #[derive(Serialize, Clone)]
 pub struct InstalledFile {
     pub project_id: String,
@@ -335,21 +414,187 @@ pub async fn mod_install(app: AppHandle, req: InstallReq) -> Result<Vec<Installe
 }
 
 async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> {
-    let (dir, inst) = find_instance(&req.instance)?;
+    let (instance_dir, inst) = find_instance(&req.instance)?;
     if inst.loader == "vanilla" {
-        return Err(anyhow!("Vanilla instances can't use mods. Create a Fabric, Quilt, Forge or NeoForge instance."));
+        return Err(anyhow!(
+            "Vanilla instances can't use mods. Create a Fabric, Quilt, Forge or NeoForge instance."
+        ));
     }
-    let mods = dir.join("instances").join(&inst.id).join("mods");
+    let mods = instance_dir.join("mods");
     fs::create_dir_all(&mods)?;
     let c = game::http();
     match req.source.as_str() {
-        "modrinth" => mr_install(&app, &c, &mods, &inst, &req.id, &req.title, req.version_id.as_deref()).await,
+        "modrinth" => {
+            mr_install(
+                &app,
+                &c,
+                &mods,
+                &inst,
+                &req.id,
+                &req.title,
+                req.version_id.as_deref(),
+            )
+            .await
+        }
         "curseforge" => {
             need_key(&req.cf_key)?;
-            cf_install(&app, &c, &mods, &inst, &req.id, &req.title, req.cf_key.trim(), req.version_id.as_deref()).await
+            cf_install(
+                &app,
+                &c,
+                &mods,
+                &inst,
+                &req.id,
+                &req.title,
+                req.cf_key.trim(),
+                req.version_id.as_deref(),
+            )
+            .await
         }
         s => Err(anyhow!("Unknown source {s}")),
     }
+}
+
+#[derive(Deserialize)]
+pub struct ContentInstallReq {
+    pub source: String,
+    pub kind: String, // resourcepack | shader
+    pub id: String,
+    pub title: String,
+    pub instance: String,
+    pub cf_key: String,
+    #[serde(default)]
+    pub version_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn content_install(
+    app: AppHandle,
+    req: ContentInstallReq,
+) -> Result<Vec<InstalledFile>, String> {
+    install_content(app, req)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+async fn install_content(app: AppHandle, req: ContentInstallReq) -> Result<Vec<InstalledFile>> {
+    let folder = match req.kind.as_str() {
+        "resourcepack" => "resourcepacks",
+        "shader" => "shaderpacks",
+        other => return Err(anyhow!("Unsupported install content kind {other}")),
+    };
+    let (instance_dir, inst) = find_instance(&req.instance)?;
+    let target = instance_dir.join(folder);
+    fs::create_dir_all(&target)?;
+    let c = game::http();
+
+    let (url, file_name, version, channel) = match req.source.as_str() {
+        "modrinth" => {
+            let ver: Value = match req.version_id.as_deref() {
+                Some(id) => jget(&c, &format!("{MR}/version/{id}"), &[], None).await?,
+                None => {
+                    let q = vec![("game_versions", json!([inst.mc]).to_string())];
+                    let versions =
+                        jget(&c, &format!("{MR}/project/{}/version", req.id), &q, None).await?;
+                    let list = versions
+                        .as_array()
+                        .filter(|items| !items.is_empty())
+                        .ok_or_else(|| {
+                            anyhow!("No version is available for Minecraft {}", inst.mc)
+                        })?;
+                    list.iter()
+                        .find(|v| v["version_type"] == "release")
+                        .unwrap_or(&list[0])
+                        .clone()
+                }
+            };
+            if ver["project_id"].as_str() != Some(req.id.as_str()) {
+                return Err(anyhow!(
+                    "The selected version does not belong to this project"
+                ));
+            }
+            let file = ver["files"]
+                .as_array()
+                .and_then(|files| {
+                    files
+                        .iter()
+                        .find(|f| f["primary"] == true)
+                        .or(files.first())
+                })
+                .ok_or_else(|| anyhow!("This version has no files"))?;
+            (
+                file["url"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("File has no download link"))?
+                    .to_string(),
+                safe_name(file["filename"].as_str().unwrap_or("content.zip"))?,
+                ver["version_number"].as_str().unwrap_or("").to_string(),
+                ver["version_type"]
+                    .as_str()
+                    .unwrap_or("release")
+                    .to_string(),
+            )
+        }
+        "curseforge" => {
+            need_key(&req.cf_key)?;
+            let file = if let Some(id) = req.version_id.as_deref() {
+                let response = jget(
+                    &c,
+                    &format!("{CF}/mods/{}/files/{id}", req.id),
+                    &[],
+                    Some(req.cf_key.trim()),
+                )
+                .await?;
+                response["data"].clone()
+            } else {
+                let q = vec![
+                    ("pageSize", "50".to_string()),
+                    ("gameVersion", inst.mc.clone()),
+                ];
+                let response = jget(
+                    &c,
+                    &format!("{CF}/mods/{}/files", req.id),
+                    &q,
+                    Some(req.cf_key.trim()),
+                )
+                .await?;
+                let files = response["data"]
+                    .as_array()
+                    .filter(|items| !items.is_empty())
+                    .ok_or_else(|| anyhow!("No version is available for Minecraft {}", inst.mc))?;
+                cf_best(files).clone()
+            };
+            let (url, name) =
+                cf_url(&file).ok_or_else(|| anyhow!("This file has no download link"))?;
+            (
+                url,
+                safe_name(&name)?,
+                file["displayName"].as_str().unwrap_or("").to_string(),
+                cf_channel(file["releaseType"].as_i64().unwrap_or(1)).to_string(),
+            )
+        }
+        other => return Err(anyhow!("Unknown source {other}")),
+    };
+
+    if !Path::new(&file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map_or(false, |ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        return Err(anyhow!(
+            "This content is not a .zip pack and cannot be installed here"
+        ));
+    }
+    emit(&app, format!("Downloading {file_name}"));
+    game::download(&c, &url, &target.join(&file_name)).await?;
+
+    Ok(vec![InstalledFile {
+        project_id: req.id,
+        project_name: req.title,
+        file_name,
+        version,
+        channel,
+        dependency: false,
+    }])
 }
 
 /// Picks the newest compatible version of a Modrinth project, downloads it and
@@ -367,20 +612,28 @@ async fn mr_fetch_one(
     let ver: Value = match version_id {
         Some(vid) => jget(c, &format!("{MR}/version/{vid}"), &[], None).await?,
         None => {
-            let q = vec![("loaders", json!([inst.loader]).to_string()), ("game_versions", json!([inst.mc]).to_string())];
+            let q = vec![
+                ("loaders", json!([inst.loader]).to_string()),
+                ("game_versions", json!([inst.mc]).to_string()),
+            ];
             let list = jget(c, &format!("{MR}/project/{project}/version"), &q, None).await?;
             let arr = list
                 .as_array()
                 .filter(|a| !a.is_empty())
                 .ok_or_else(|| anyhow!("No version for Minecraft {} + {}", inst.mc, inst.loader))?;
-            arr.iter().find(|v| v["version_type"] == "release").unwrap_or(&arr[0]).clone()
+            arr.iter()
+                .find(|v| v["version_type"] == "release")
+                .unwrap_or(&arr[0])
+                .clone()
         }
     };
     let file = ver["files"]
         .as_array()
         .and_then(|a| a.iter().find(|f| f["primary"] == true).or(a.first()))
         .ok_or_else(|| anyhow!("This version has no files"))?;
-    let url = file["url"].as_str().ok_or_else(|| anyhow!("File has no download link"))?;
+    let url = file["url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("File has no download link"))?;
     let name = safe_name(file["filename"].as_str().unwrap_or("mod.jar"))?;
     emit(app, format!("Downloading {name}"));
     game::download(c, url, &mods.join(&name)).await?;
@@ -390,7 +643,12 @@ async fn mr_fetch_one(
         .into_iter()
         .flatten()
         .filter(|d| d["dependency_type"] == "required")
-        .filter_map(|d| Some((d["project_id"].as_str()?.to_string(), d["version_id"].as_str().map(String::from))))
+        .filter_map(|d| {
+            Some((
+                d["project_id"].as_str()?.to_string(),
+                d["version_id"].as_str().map(String::from),
+            ))
+        })
         .collect();
 
     let project_name = match known_title {
@@ -402,23 +660,49 @@ async fn mr_fetch_one(
         project_name,
         file_name: name,
         version: ver["version_number"].as_str().unwrap_or("").to_string(),
-        channel: ver["version_type"].as_str().unwrap_or("release").to_string(),
+        channel: ver["version_type"]
+            .as_str()
+            .unwrap_or("release")
+            .to_string(),
         dependency,
     };
     Ok((info, deps))
 }
 
-async fn mr_install(app: &AppHandle, c: &reqwest::Client, mods: &Path, inst: &Instance, project: &str, title: &str, root_version: Option<&str>) -> Result<Vec<InstalledFile>> {
+async fn mr_install(
+    app: &AppHandle,
+    c: &reqwest::Client,
+    mods: &Path,
+    inst: &Instance,
+    project: &str,
+    title: &str,
+    root_version: Option<&str>,
+) -> Result<Vec<InstalledFile>> {
     // (project id, version id, is this a dependency, known title)
-    let mut queue: Vec<(String, Option<String>, bool, Option<String>)> =
-        vec![(project.to_string(), root_version.map(String::from), false, Some(title.to_string()))];
+    let mut queue: Vec<(String, Option<String>, bool, Option<String>)> = vec![(
+        project.to_string(),
+        root_version.map(String::from),
+        false,
+        Some(title.to_string()),
+    )];
     let mut seen = HashSet::new();
     let mut files = vec![];
     while let Some((pid, vid, dependency, known_title)) = queue.pop() {
         if !seen.insert(pid.clone()) {
             continue;
         }
-        match mr_fetch_one(app, c, mods, inst, &pid, vid.as_deref(), known_title.as_deref(), dependency).await {
+        match mr_fetch_one(
+            app,
+            c,
+            mods,
+            inst,
+            &pid,
+            vid.as_deref(),
+            known_title.as_deref(),
+            dependency,
+        )
+        .await
+        {
             Ok((info, deps)) => {
                 files.push(info);
                 queue.extend(deps.into_iter().map(|(id, vid)| (id, vid, true, None)));
@@ -446,13 +730,22 @@ async fn cf_fetch_one(
     let best = match target_file {
         // the person picked an exact file from the version list
         Some(fid) => {
-            let v = jget(c, &format!("{CF}/mods/{mod_id}/files/{fid}"), &[], Some(key)).await?;
+            let v = jget(
+                c,
+                &format!("{CF}/mods/{mod_id}/files/{fid}"),
+                &[],
+                Some(key),
+            )
+            .await?;
             fetched = v["data"].clone();
             &fetched
         }
         // no specific file asked for (always the case for dependencies): newest compatible one
         None => {
-            let mut q = vec![("pageSize", "50".to_string()), ("gameVersion", inst.mc.clone())];
+            let mut q = vec![
+                ("pageSize", "50".to_string()),
+                ("gameVersion", inst.mc.clone()),
+            ];
             if let Some(t) = cf_loader(&inst.loader) {
                 q.push(("modLoaderType", t.to_string()));
             }
@@ -496,9 +789,19 @@ async fn cf_fetch_one(
     Ok((info, deps))
 }
 
-async fn cf_install(app: &AppHandle, c: &reqwest::Client, mods: &Path, inst: &Instance, project: &str, title: &str, key: &str, root_version: Option<&str>) -> Result<Vec<InstalledFile>> {
+async fn cf_install(
+    app: &AppHandle,
+    c: &reqwest::Client,
+    mods: &Path,
+    inst: &Instance,
+    project: &str,
+    title: &str,
+    key: &str,
+    root_version: Option<&str>,
+) -> Result<Vec<InstalledFile>> {
     // (mod id, is this a dependency, known title)
-    let mut queue: Vec<(String, bool, Option<String>)> = vec![(project.to_string(), false, Some(title.to_string()))];
+    let mut queue: Vec<(String, bool, Option<String>)> =
+        vec![(project.to_string(), false, Some(title.to_string()))];
     let mut seen = HashSet::new();
     let mut files = vec![];
     while let Some((id, dependency, known_title)) = queue.pop() {
@@ -506,7 +809,19 @@ async fn cf_install(app: &AppHandle, c: &reqwest::Client, mods: &Path, inst: &In
             continue;
         }
         let target = if dependency { None } else { root_version };
-        match cf_fetch_one(app, c, mods, inst, key, &id, known_title.as_deref(), dependency, target).await {
+        match cf_fetch_one(
+            app,
+            c,
+            mods,
+            inst,
+            key,
+            &id,
+            known_title.as_deref(),
+            dependency,
+            target,
+        )
+        .await
+        {
             Ok((info, deps)) => {
                 files.push(info);
                 queue.extend(deps.into_iter().map(|d| (d, true, None)));
@@ -527,7 +842,13 @@ pub struct PackReq {
     pub id: String,
     pub name: String,
     pub java: String,
+    #[serde(default = "default_java_runtime")]
+    pub java_mode: String,
     pub cf_key: String,
+}
+
+fn default_java_runtime() -> String {
+    "system".into()
 }
 
 #[tauri::command]
@@ -545,22 +866,41 @@ struct Plan {
 
 async fn mr_pack_file(c: &reqwest::Client, id: &str) -> Result<(String, String)> {
     let list = jget(c, &format!("{MR}/project/{id}/version"), &[], None).await?;
-    let arr = list.as_array().filter(|a| !a.is_empty()).ok_or_else(|| anyhow!("This modpack has no versions"))?;
-    let v = arr.iter().find(|v| v["version_type"] == "release").unwrap_or(&arr[0]);
+    let arr = list
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| anyhow!("This modpack has no versions"))?;
+    let v = arr
+        .iter()
+        .find(|v| v["version_type"] == "release")
+        .unwrap_or(&arr[0]);
     let f = v["files"]
         .as_array()
         .and_then(|a| a.iter().find(|f| f["primary"] == true).or(a.first()))
         .ok_or_else(|| anyhow!("No file in the modpack version"))?;
     Ok((
-        f["url"].as_str().ok_or_else(|| anyhow!("No download link"))?.to_string(),
+        f["url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("No download link"))?
+            .to_string(),
         safe_name(f["filename"].as_str().unwrap_or("pack.mrpack"))?,
     ))
 }
 
 async fn cf_pack_file(c: &reqwest::Client, id: &str, key: &str) -> Result<(String, String)> {
-    let v = jget(c, &format!("{CF}/mods/{id}/files"), &[("pageSize", "20".to_string())], Some(key)).await?;
-    let arr = v["data"].as_array().filter(|a| !a.is_empty()).ok_or_else(|| anyhow!("This modpack has no files"))?;
-    let (url, name) = cf_url(cf_best(arr)).ok_or_else(|| anyhow!("The modpack has no download link"))?;
+    let v = jget(
+        c,
+        &format!("{CF}/mods/{id}/files"),
+        &[("pageSize", "20".to_string())],
+        Some(key),
+    )
+    .await?;
+    let arr = v["data"]
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| anyhow!("This modpack has no files"))?;
+    let (url, name) =
+        cf_url(cf_best(arr)).ok_or_else(|| anyhow!("The modpack has no download link"))?;
     Ok((url, safe_name(&name)?))
 }
 
@@ -573,38 +913,78 @@ fn read_plan(source: &str, archive: &Path) -> Result<Plan> {
             .read_to_string(&mut s)?;
         let v: Value = serde_json::from_str(&s)?;
         let d = &v["dependencies"];
-        let mc = d["minecraft"].as_str().ok_or_else(|| anyhow!("The pack doesn't say which Minecraft version it uses"))?.to_string();
-        let loader = if d.get("fabric-loader").is_some() { "fabric" }
-            else if d.get("quilt-loader").is_some() { "quilt" }
-            else if d.get("neoforge").is_some() { "neoforge" }
-            else if d.get("forge").is_some() { "forge" }
-            else { "vanilla" };
+        let mc = d["minecraft"]
+            .as_str()
+            .ok_or_else(|| anyhow!("The pack doesn't say which Minecraft version it uses"))?
+            .to_string();
+        let loader = if d.get("fabric-loader").is_some() {
+            "fabric"
+        } else if d.get("quilt-loader").is_some() {
+            "quilt"
+        } else if d.get("neoforge").is_some() {
+            "neoforge"
+        } else if d.get("forge").is_some() {
+            "forge"
+        } else {
+            "vanilla"
+        };
         let urls = v["files"]
             .as_array()
             .into_iter()
             .flatten()
             .filter(|f| f["env"]["client"] != "unsupported")
-            .filter_map(|f| Some((f["path"].as_str()?.to_string(), f["downloads"][0].as_str()?.to_string())))
+            .filter_map(|f| {
+                Some((
+                    f["path"].as_str()?.to_string(),
+                    f["downloads"][0].as_str()?.to_string(),
+                ))
+            })
             .collect();
-        Ok(Plan { mc, loader: loader.into(), urls, cf_files: vec![], overrides: vec!["overrides/".into(), "client-overrides/".into()] })
+        Ok(Plan {
+            mc,
+            loader: loader.into(),
+            urls,
+            cf_files: vec![],
+            overrides: vec!["overrides/".into(), "client-overrides/".into()],
+        })
     } else {
         let mut s = String::new();
         z.by_name("manifest.json")
             .map_err(|_| anyhow!("Not a valid CurseForge pack (manifest.json is missing)"))?
             .read_to_string(&mut s)?;
         let m: Value = serde_json::from_str(&s)?;
-        let mc = m["minecraft"]["version"].as_str().ok_or_else(|| anyhow!("The pack doesn't say which Minecraft version it uses"))?.to_string();
-        let loaders = m["minecraft"]["modLoaders"].as_array().cloned().unwrap_or_default();
-        let first = loaders.iter().find(|l| l["primary"] == true).or(loaders.first());
+        let mc = m["minecraft"]["version"]
+            .as_str()
+            .ok_or_else(|| anyhow!("The pack doesn't say which Minecraft version it uses"))?
+            .to_string();
+        let loaders = m["minecraft"]["modLoaders"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let first = loaders
+            .iter()
+            .find(|l| l["primary"] == true)
+            .or(loaders.first());
         let loader = first
             .and_then(|l| l["id"].as_str())
             .and_then(|id| id.split('-').next())
             .filter(|l| ["forge", "fabric", "quilt", "neoforge"].contains(l))
             .unwrap_or("vanilla")
             .to_string();
-        let cf_files = m["files"].as_array().into_iter().flatten().filter_map(|f| f["fileID"].as_u64()).collect();
+        let cf_files = m["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f["fileID"].as_u64())
+            .collect();
         let ov = m["overrides"].as_str().unwrap_or("overrides");
-        Ok(Plan { mc, loader, urls: vec![], cf_files, overrides: vec![format!("{ov}/")] })
+        Ok(Plan {
+            mc,
+            loader,
+            urls: vec![],
+            cf_files,
+            overrides: vec![format!("{ov}/")],
+        })
     }
 }
 
@@ -635,8 +1015,8 @@ fn extract_overrides(archive: &Path, prefixes: &[String], inst: &Path) -> Result
 
 async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     let (dir, launcher, cfg) = crate::setup_dirs();
+    let instance_root = crate::instance_root().map_err(|error| anyhow!("{error}"))?;
     let c = game::http();
-    let java = crate::pick_java(&req.java);
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(anyhow!("The modpack has no name"));
@@ -662,7 +1042,11 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
 
     // 2. read what the pack needs
     let plan = read_plan(&req.source, &archive)?;
-    emit(&app, format!("Pack uses Minecraft {} with {}", plan.mc, plan.loader));
+    let java = crate::pick_java(&app, &req.java, &req.java_mode, &plan.mc).await?;
+    emit(
+        &app,
+        format!("Pack uses Minecraft {} with {}", plan.mc, plan.loader),
+    );
 
     // 3. Minecraft + loader + libraries/assets
     game::install_vanilla(&app, &c, &dir, &plan.mc).await?;
@@ -673,11 +1057,11 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     let base = crate::slug(&name);
     let mut id = base.clone();
     let mut n = 2;
-    while list.iter().any(|i| i.id == id) || dir.join("instances").join(&id).exists() {
+    while list.iter().any(|i| i.id == id) || instance_root.join(&id).exists() {
         id = format!("{base}-{n}");
         n += 1;
     }
-    let inst = dir.join("instances").join(&id);
+    let inst = instance_root.join(&id);
     game::install_deps(&app, &c, &dir, &version_id, &v, &inst).await?;
     game::prepare_instance(&inst)?;
 
@@ -695,7 +1079,10 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
                 .send()
                 .await?;
             if !resp.status().is_success() {
-                return Err(anyhow!("CurseForge answered {} while listing the pack files", resp.status()));
+                return Err(anyhow!(
+                    "CurseForge answered {} while listing the pack files",
+                    resp.status()
+                ));
             }
             let data: Value = resp.json().await?;
             for f in data["data"].as_array().into_iter().flatten() {
@@ -725,16 +1112,35 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
         .buffer_unordered(8)
         .collect()
         .await;
-    let failed: Vec<String> = results.iter().filter_map(|r| r.as_ref().err().map(|e| format!("{e:#}"))).collect();
+    let failed: Vec<String> = results
+        .iter()
+        .filter_map(|r| r.as_ref().err().map(|e| format!("{e:#}")))
+        .collect();
     if !failed.is_empty() {
-        emit(&app, format!("Warning: {} file(s) could not be downloaded (first error: {})", failed.len(), failed[0]));
+        emit(
+            &app,
+            format!(
+                "Warning: {} file(s) could not be downloaded (first error: {})",
+                failed.len(),
+                failed[0]
+            ),
+        );
     }
 
     // 5. config files, resource packs etc. shipped inside the pack
     extract_overrides(&archive, &plan.overrides, &inst)?;
 
-    list.push(Instance { id, name, loader: plan.loader, mc: plan.mc, version_id, icon: String::new(), description: String::new(), background: String::new() });
-    instances::save(&cfg, &list);
+    list.push(Instance {
+        id,
+        name,
+        loader: plan.loader,
+        mc: plan.mc,
+        version_id,
+        icon: String::new(),
+        description: String::new(),
+        background: String::new(),
+    });
+    instances::save(&cfg, &list).map_err(|e| anyhow!("{e}"))?;
     emit(&app, "Instance ready");
     Ok(list)
 }

@@ -26,9 +26,10 @@ Features
 
 - Custom Design — A unique interface designed specifically for Arca-Launcher.
 - Custom Instances — Create instances with your own name, description, logo, and background.
-- Mod & Modpack Downloads — Download supported content from Modrinth and CurseForge.
+- Installed Content — View installed mods, resource packs, and shader packs for each instance, and open their folders.
+- Content Downloader — Search and download mods, modpacks, resource packs, and shader packs from Modrinth and CurseForge, with relevance, download-count, and recently-updated sorting.
 - Multi-Account Support — Manage Offline, Microsoft, and Ely.by accounts.
-- Simple Settings — Configuration designed to be easy to understand, even for beginners.
+- Simple Settings — Adjust memory, system or launcher-managed Java, fullscreen launch, instance storage, and install concurrency and cleanup.
 
 Built With
 

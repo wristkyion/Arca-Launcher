@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Inst } from "./mods";
+import { useDownloads } from "./downloads";
 
 type Item = { name: string; file_name: string; enabled: boolean; size: number };
 type Kind = "mods" | "resourcepacks" | "shaderpacks";
@@ -15,6 +16,7 @@ const fmtSize = (n: number) =>
   n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(0) + " KB" : n + " B";
 
 export default function ContentPage({ inst }: { inst: Inst | null }) {
+  const { refreshInstalled } = useDownloads();
   const [kind, setKind] = useState<Kind>("mods");
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
@@ -57,6 +59,7 @@ export default function ContentPage({ inst }: { inst: Inst | null }) {
     try {
       await invoke("delete_content", { req: { instance: inst.id, kind, file_name: it.file_name } });
       await load();
+      await refreshInstalled(inst.id, kind === "mods" ? "mod" : kind === "resourcepacks" ? "resourcepack" : "shader");
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -69,7 +72,7 @@ export default function ContentPage({ inst }: { inst: Inst | null }) {
   if (!inst) return <section className="panel"><p className="hint">Select an instance on the Home page first.</p></section>;
 
   return (
-    <section className="panel">
+    <section className="panel installed-content-panel">
       <div className="ptop">
         <h2>Content — {inst.name}</h2>
         <button className="mini" onClick={openFolder}>Open folder</button>

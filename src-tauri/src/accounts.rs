@@ -32,5 +32,8 @@ pub fn load(dir: &Path) -> Store {
 }
 
 pub fn save(dir: &Path, s: &Store) {
-    let _ = std::fs::write(dir.join("accounts.json"), serde_json::to_string_pretty(s).unwrap());
+    let _ = std::fs::write(
+        dir.join("accounts.json"),
+        serde_json::to_string_pretty(s).unwrap(),
+    );
 }

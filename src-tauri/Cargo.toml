@@ -1,6 +1,6 @@
 [package]
 name = "arca-launcher"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [build-dependencies]
@@ -21,3 +21,4 @@ dirs = "5"
 webbrowser = "1"
 base64 = "0.22"
 sysinfo = "0.32"
+tauri-plugin-dialog = "2.8.3"

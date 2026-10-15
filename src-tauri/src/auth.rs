@@ -38,9 +38,19 @@ async fn injector(dir: &Path) -> Result<PathBuf> {
     let jar = dir.join("authlib-injector.jar");
     if !jar.exists() {
         let c = reqwest::Client::new();
-        let info: Value = c.get("https://authlib-injector.yushi.moe/artifact/latest.json").send().await?.json().await?;
-        let url = info["download_url"].as_str().ok_or_else(|| anyhow!("authlib-injector url missing"))?;
-        std::fs::write(&jar, c.get(url).send().await?.error_for_status()?.bytes().await?)?;
+        let info: Value = c
+            .get("https://authlib-injector.yushi.moe/artifact/latest.json")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let url = info["download_url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("authlib-injector url missing"))?;
+        std::fs::write(
+            &jar,
+            c.get(url).send().await?.error_for_status()?.bytes().await?,
+        )?;
     }
     Ok(jar)
 }
@@ -56,12 +66,18 @@ pub async fn ely_login(dir: &Path, user: &str, pass: &str, client_token: &str) -
     let ok = r.status().is_success();
     let v: Value = r.json().await?;
     if !ok {
-        return Err(anyhow!(v["errorMessage"].as_str().unwrap_or("Ely.by login failed").to_string()));
+        return Err(anyhow!(v["errorMessage"]
+            .as_str()
+            .unwrap_or("Ely.by login failed")
+            .to_string()));
     }
     let p = &v["selectedProfile"];
     let jar = injector(dir).await?;
     Ok(Account {
-        username: p["name"].as_str().ok_or_else(|| anyhow!("No Ely.by profile on this account"))?.into(),
+        username: p["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("No Ely.by profile on this account"))?
+            .into(),
         uuid: p["id"].as_str().unwrap_or_default().into(),
         token: v["accessToken"].as_str().unwrap_or_default().into(),
         user_type: "mojang".into(),
@@ -70,10 +86,22 @@ pub async fn ely_login(dir: &Path, user: &str, pass: &str, client_token: &str) -
 }
 
 /// Reuse a saved token; refresh it if it expired.
-pub async fn ely_session(dir: &Path, name: &str, uuid: &str, access: &str, client_token: &str) -> Result<Account> {
+pub async fn ely_session(
+    dir: &Path,
+    name: &str,
+    uuid: &str,
+    access: &str,
+    client_token: &str,
+) -> Result<Account> {
     let c = reqwest::Client::new();
     let mut token = access.to_string();
-    let valid = c.post(format!("{ELY}/validate")).json(&json!({"accessToken": token})).send().await?.status().is_success();
+    let valid = c
+        .post(format!("{ELY}/validate"))
+        .json(&json!({"accessToken": token}))
+        .send()
+        .await?
+        .status()
+        .is_success();
     if !valid {
         let r = c
             .post(format!("{ELY}/refresh"))
@@ -83,9 +111,14 @@ pub async fn ely_session(dir: &Path, name: &str, uuid: &str, access: &str, clien
         let ok = r.status().is_success();
         let v: Value = r.json().await?;
         if !ok {
-            return Err(anyhow!("Ely.by session expired. Remove the account and add it again."));
+            return Err(anyhow!(
+                "Ely.by session expired. Remove the account and add it again."
+            ));
         }
-        token = v["accessToken"].as_str().ok_or_else(|| anyhow!("Ely.by refresh failed"))?.to_string();
+        token = v["accessToken"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Ely.by refresh failed"))?
+            .to_string();
     }
     let jar = injector(dir).await?;
     Ok(Account {
@@ -103,9 +136,12 @@ const TENANT: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
 const SCOPE: &str = "XboxLive.signin offline_access";
 
 fn tokens(v: &Value) -> Result<(String, String)> {
-    let a = v["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow!(v["error_description"].as_str().unwrap_or("Microsoft login failed").to_string()))?;
+    let a = v["access_token"].as_str().ok_or_else(|| {
+        anyhow!(v["error_description"]
+            .as_str()
+            .unwrap_or("Microsoft login failed")
+            .to_string())
+    })?;
     Ok((a.into(), v["refresh_token"].as_str().unwrap_or("").into()))
 }
 
@@ -119,8 +155,15 @@ pub async fn ms_new(app: &AppHandle, client_id: &str) -> Result<(Account, String
         .await?
         .json()
         .await?;
-    let code = d["user_code"].as_str().ok_or_else(|| anyhow!(d["error_description"].as_str().unwrap_or("Device code request failed").to_string()))?;
-    let url = d["verification_uri"].as_str().unwrap_or("https://microsoft.com/link");
+    let code = d["user_code"].as_str().ok_or_else(|| {
+        anyhow!(d["error_description"]
+            .as_str()
+            .unwrap_or("Device code request failed")
+            .to_string())
+    })?;
+    let url = d["verification_uri"]
+        .as_str()
+        .unwrap_or("https://microsoft.com/link");
     let device = d["device_code"].as_str().unwrap_or_default();
     let mut interval = d["interval"].as_u64().unwrap_or(5);
     let _ = app.emit("ms-code", json!({"code": code, "url": url}));
@@ -129,7 +172,11 @@ pub async fn ms_new(app: &AppHandle, client_id: &str) -> Result<(Account, String
         tokio::time::sleep(Duration::from_secs(interval)).await;
         let v: Value = c
             .post(format!("{TENANT}/token"))
-            .form(&[("client_id", client_id), ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("device_code", device)])
+            .form(&[
+                ("client_id", client_id),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device),
+            ])
             .send()
             .await?
             .json()
@@ -140,7 +187,12 @@ pub async fn ms_new(app: &AppHandle, client_id: &str) -> Result<(Account, String
         match v["error"].as_str() {
             Some("authorization_pending") => {}
             Some("slow_down") => interval += 5,
-            _ => return Err(anyhow!(v["error_description"].as_str().unwrap_or("Microsoft login failed").to_string())),
+            _ => {
+                return Err(anyhow!(v["error_description"]
+                    .as_str()
+                    .unwrap_or("Microsoft login failed")
+                    .to_string()))
+            }
         }
     };
     Ok((ms_finish(&c, &access).await?, refresh))
@@ -151,13 +203,23 @@ pub async fn ms_resume(client_id: &str, refresh: &str) -> Result<(Account, Strin
     let c = reqwest::Client::new();
     let v: Value = c
         .post(format!("{TENANT}/token"))
-        .form(&[("client_id", client_id), ("grant_type", "refresh_token"), ("refresh_token", refresh), ("scope", SCOPE)])
+        .form(&[
+            ("client_id", client_id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("scope", SCOPE),
+        ])
         .send()
         .await?
         .json()
         .await?;
-    let (access, new_refresh) = tokens(&v).map_err(|_| anyhow!("Microsoft session expired. Remove the account and add it again."))?;
-    let rt = if new_refresh.is_empty() { refresh.to_string() } else { new_refresh };
+    let (access, new_refresh) = tokens(&v)
+        .map_err(|_| anyhow!("Microsoft session expired. Remove the account and add it again."))?;
+    let rt = if new_refresh.is_empty() {
+        refresh.to_string()
+    } else {
+        new_refresh
+    };
     Ok((ms_finish(&c, &access).await?, rt))
 }
 
@@ -168,25 +230,45 @@ async fn ms_finish(c: &reqwest::Client, ms_access: &str) -> Result<Account> {
         .json(&json!({"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": format!("d={ms_access}")},
                       "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}))
         .send().await?.json().await?;
-    let xbl_token = xbl["Token"].as_str().ok_or_else(|| anyhow!("Xbox Live authentication failed"))?;
-    let uhs = xbl["DisplayClaims"]["xui"][0]["uhs"].as_str().ok_or_else(|| anyhow!("Missing Xbox user hash"))?;
+    let xbl_token = xbl["Token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Xbox Live authentication failed"))?;
+    let uhs = xbl["DisplayClaims"]["xui"][0]["uhs"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Missing Xbox user hash"))?;
 
     let xsts: Value = c
         .post("https://xsts.auth.xboxlive.com/xsts/authorize")
-        .json(&json!({"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbl_token]},
-                      "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}))
-        .send().await?.json().await?;
+        .json(
+            &json!({"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbl_token]},
+                      "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}),
+        )
+        .send()
+        .await?
+        .json()
+        .await?;
     let xsts_token = xsts["Token"].as_str().ok_or_else(|| anyhow!("XSTS failed (Xbox error {}). The account may lack an Xbox profile or be a child account.", xsts["XErr"]))?;
 
     let mc: Value = c
         .post("https://api.minecraftservices.com/authentication/login_with_xbox")
         .json(&json!({"identityToken": format!("XBL3.0 x={uhs};{xsts_token}")}))
-        .send().await?.json().await?;
-    let mc_token = mc["access_token"].as_str().ok_or_else(|| anyhow!("Minecraft login failed"))?;
+        .send()
+        .await?
+        .json()
+        .await?;
+    let mc_token = mc["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Minecraft login failed"))?;
 
-    let r = c.get("https://api.minecraftservices.com/minecraft/profile").bearer_auth(mc_token).send().await?;
+    let r = c
+        .get("https://api.minecraftservices.com/minecraft/profile")
+        .bearer_auth(mc_token)
+        .send()
+        .await?;
     if !r.status().is_success() {
-        return Err(anyhow!("This Microsoft account doesn't own Minecraft: Java Edition"));
+        return Err(anyhow!(
+            "This Microsoft account doesn't own Minecraft: Java Edition"
+        ));
     }
     let p: Value = r.json().await?;
     Ok(Account {

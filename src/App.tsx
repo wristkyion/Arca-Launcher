@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import ModsPage from "./mods";
-import { DownloadsProvider, DownloadOverlay } from "./downloads";
+import ContentPage from "./content";
+import { DownloadsProvider, DownloadOverlay, useDownloads } from "./downloads";
 import CrashWatcher from "./CrashWatcher";
 // @ts-ignore CSS is handled by the bundler; TypeScript may not have a CSS module declaration.
 import "./styles.css";
@@ -16,19 +18,27 @@ type Instance = { id: string; name: string; loader: string; mc: string; version_
 
 type Settings = {
   ramAuto: boolean; jvmArgs: string; gameArgs: string;
+  launchFullscreen: boolean;
   hide: "keep" | "hide" | "close";
   volumeOn: boolean; volume: number; uiScale: number;
   showSnapshots: boolean; showExperimental: boolean; showBeta: boolean; showAlpha: boolean;
+  downloadConcurrency: number; autoClearDownloads: boolean;
+  instanceDirectory: string;
+  javaRuntime: "system" | "launcher";
 };
 const DEFAULTS: Settings = {
-  ramAuto: true, jvmArgs: "", gameArgs: "", hide: "keep",
+  ramAuto: true, jvmArgs: "", gameArgs: "", launchFullscreen: false, hide: "keep",
   volumeOn: false, volume: 100, uiScale: 100,
   showSnapshots: false, showExperimental: false, showBeta: false, showAlpha: false,
+  downloadConcurrency: 3, autoClearDownloads: true,
+  instanceDirectory: "",
+  javaRuntime: "system",
 };
 
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
-  { v: "1.0", title: "Arca Launcher", items: ["First public release"] },
+  { v: "0.1.1", title: "Fix and Improvements", items: ["Fix and added new features mods installation", "New logo modloader", "Added background support GIF/PNG/JPG", "Added mod list installation", "Remake UI", "Added system or launcher-managed Java runtime options", "Added fullscreen launch setting", "Added instance storage folder and install queue settings", "Renamed the Downloader page and added resource pack and shader pack support"] },
+  { v: "0.1.0", title: "First Release", items: ["Initial release", "Publish github repository"] },
 ];
 
 /** Auto RAM: 3 GB for vanilla, 6 GB for modded, never more than 60% of the machine. */
@@ -37,6 +47,7 @@ const autoRam = (total: number, loader: string) => {
   const cap = total ? Math.floor((total * 0.6) / 512) * 512 : want;
   return Math.max(1024, Math.min(want, cap));
 };
+const displayPath = (path: string) => path.startsWith("\\\\?\\") ? path.slice(4) : path;
 // Mojang files these under "snapshot"; we recognise the special ones by name
 const isExperimental = (v: VersionInfo) =>
   v.kind === "snapshot" && /combat|experimental|infinite|oneblock|a_or_b|potato|craftmine|rv-|shareware|trendy/i.test(v.id);
@@ -73,8 +84,42 @@ const Icon = ({ n, filled }: { n: string; filled?: boolean }) => (
     strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={ICONS[n]} /></svg>
 );
 
-const pref = (k: string, d: string) => localStorage.getItem(k) ?? d;
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Shows a saved background image (including an animated gif). */
+function BgPreview({ src, className }: { src: string; className?: string }) {
+  if (!src) return null;
+  return <img className={className} src={src} alt="" />;
+}
+
+/** A simple centered dialog with a dark scrim backdrop. Click outside or the ✕ to close. */
+function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(2px)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#16161d", border: "1px solid #2a2a35", borderRadius: 14,
+          width: wide ? "min(760px, 92vw)" : "min(520px, 92vw)", height: "min(760px, 86vh)", maxHeight: "86vh",
+          display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden",
+          padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h3 style={{ margin: 0 }}>{title}</h3>
+          <button className="mini" onClick={onClose}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 type Skin = { url: string; slim: boolean; data?: string } | null;
 
@@ -198,34 +243,25 @@ function Avatar({ acc, skin }: { acc: Acc; skin: Skin }) {
 const kindLabel = (v: VersionInfo) =>
   v.kind === "release" ? "Release" : isExperimental(v) ? "Experimental" : v.kind === "snapshot" ? "Snapshot" : v.kind === "old_beta" ? "Beta" : v.kind === "old_alpha" ? "Alpha" : v.kind;
 
-/** Stand-in loader logos (original artwork). Pick a custom image to use official logos. */
+const LOADER_ICONS: Record<string, string> = {
+  vanilla: new URL("../assets/modifted/vanilla.jpg", import.meta.url).href,
+  fabric: new URL("../assets/modifted/fabric.png", import.meta.url).href,
+  quilt: new URL("../assets/modifted/quilt.png", import.meta.url).href,
+  forge: new URL("../assets/modifted/forge.jpg", import.meta.url).href,
+  neoforge: new URL("../assets/modifted/neoforge.png", import.meta.url).href,
+};
+
 function LoaderIcon({ loader, size }: { loader: string; size: number }) {
-  const p = { width: size, height: size, viewBox: "0 0 64 64", style: { flexShrink: 0 } } as const;
-  switch (loader) {
-    case "forge":
-      return (<svg {...p}><rect width="64" height="64" rx="14" fill="#25314a" />
-        <path d="M10 22h36c0 7-5 10-10 11v6h7v7H20v-7h7v-6c-6-1-11-4-11-11H10z" fill="#e8742a" />
-        <path d="M46 22l9-4v7l-9 1z" fill="#e8742a" /></svg>);
-    case "fabric":
-      return (<svg {...p}><defs><clipPath id="fabc"><rect width="64" height="64" rx="14" /></clipPath></defs>
-        <rect width="64" height="64" rx="14" fill="#d9c9a3" />
-        <g clipPath="url(#fabc)" stroke="#a98f55" strokeWidth="6" fill="none">
-          <path d="M-4 20L44 68M20 -4L68 44M-4 44L20 68M44 -4L68 20" /></g></svg>);
-    case "quilt":
-      return (<svg {...p}><rect width="64" height="64" rx="14" fill="#1b1830" />
-        <rect x="6" y="6" width="24" height="24" rx="4" fill="#6c8cff" /><rect x="34" y="6" width="24" height="24" rx="4" fill="#f2b84b" />
-        <rect x="6" y="34" width="24" height="24" rx="4" fill="#e0607e" /><rect x="34" y="34" width="24" height="24" rx="4" fill="#5ec98e" />
-        <path d="M32 4V60M4 32H60" stroke="#fff" strokeDasharray="3 3" opacity=".6" /></svg>);
-    case "neoforge":
-      return (<svg {...p}><rect width="64" height="64" rx="14" fill="#2a1d12" />
-        <path d="M32 8l20 12v24L32 56 12 44V20z" fill="#f08a24" />
-        <path d="M24 42V22h4l8 12V22h4v20h-4l-8-12v12z" fill="#2a1d12" /></svg>);
-    default:
-      return (<svg {...p}><rect width="64" height="64" rx="14" fill="#1b2a1b" />
-        <path d="M32 10l22 11-22 11L10 21z" fill="#6cc51f" />
-        <path d="M10 21l22 11v22L10 43z" fill="#8b5a2b" />
-        <path d="M54 21v22L32 54V32z" fill="#6e4421" /></svg>);
-  }
+  return (
+    <img
+      className="loadericon"
+      src={LOADER_ICONS[loader] ?? LOADER_ICONS.vanilla}
+      width={size}
+      height={size}
+      style={{ borderRadius: size * 0.18 }}
+      alt=""
+    />
+  );
 }
 
 function InstIcon({ inst, size }: { inst: { loader: string; icon?: string }; size: number }) {
@@ -235,6 +271,7 @@ function InstIcon({ inst, size }: { inst: { loader: string; icon?: string }; siz
 }
 
 function AppInner() {
+  const { configureDownloads } = useDownloads();
   const [page, setPageNow] = useState<Page>("play");
   const [fade, setFade] = useState<"in" | "out">("in");
   const pageRef = useRef<Page>("play");
@@ -245,6 +282,16 @@ function AppInner() {
     setTimeout(() => { setPageNow(p); setFade("in"); }, 160);
   };
 
+  // whether the settings file has finished loading from the backend (avoids
+  // overwriting game/launcher/config/settings.json with defaults before it loads)
+  const loadedRef = useRef(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [startup, setStartup] = useState(false);
+  const [firstRunOpen, setFirstRunOpen] = useState(false);
+  const [firstRunStep, setFirstRunStep] = useState(0);
+  const [firstRunBusy, setFirstRunBusy] = useState(false);
+  const [firstRunError, setFirstRunError] = useState("");
+
   // accounts
   const [accounts, setAccounts] = useState<Acc[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -253,12 +300,14 @@ function AppInner() {
   const [addPass, setAddPass] = useState("");
   const [addBusy, setAddBusy] = useState(false);
   const [addErr, setAddErr] = useState("");
-  const [msClientId, setMsClientId] = useState(pref("msClientId", ""));
-  const [cfKey, setCfKey] = useState(pref("cfKey", ""));
+  const [msClientId, setMsClientId] = useState("");
+  const [cfKey, setCfKey] = useState("");
 
   // instances
   const [instances, setInstances] = useState<Instance[]>([]);
-  const [instId, setInstId] = useState(pref("instance", ""));
+  const [instId, setInstId] = useState("");
+  const [activeBackground, setActiveBackground] = useState("");
+  const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuClosing, setMenuClosing] = useState(false);
   const closeMenu = () => {
@@ -292,20 +341,22 @@ function AppInner() {
   const [vinfo, setVinfo] = useState<VersionInfo[]>([]);
   const [filter, setFilter] = useState("");
   const [sysRam, setSysRam] = useState(0);
-  const [st, setSt] = useState<Settings>(() => {
-    try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem("settings") ?? "{}") }; } catch { return DEFAULTS; }
-  });
+  const [st, setSt] = useState<Settings>(DEFAULTS);
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSt((p) => ({ ...p, [k]: v }));
-  const [ram, setRam] = useState(parseInt(pref("ram", "4096")));
-  const [java, setJava] = useState(pref("java", "java"));
+  const [instanceDirectoryDraft, setInstanceDirectoryDraft] = useState("");
+  const [instanceDirectoryBusy, setInstanceDirectoryBusy] = useState(false);
+  const [instanceDirectoryMessage, setInstanceDirectoryMessage] = useState("");
+  const [javaRuntimeBusy, setJavaRuntimeBusy] = useState(false);
+  const [javaRuntimeMessage, setJavaRuntimeMessage] = useState("");
+  const [ram, setRam] = useState(4096);
+  const [java, setJava] = useState("java");
+  const [showCrashReports, setShowCrashReports] = useState(true);
 
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [msCode, setMsCode] = useState<{ code: string; url: string } | null>(null);
   const [skinFail, setSkinFail] = useState(false);
-  const [skins, setSkins] = useState<Record<string, Skin>>(() => {
-    try { return JSON.parse(localStorage.getItem("skins") ?? "{}"); } catch { return {}; }
-  });
+  const [skins, setSkins] = useState<Record<string, Skin>>({});
   const fetchedSkins = useRef(new Set<string>());
   const logRef = useRef<HTMLDivElement>(null);
   const [winH, setWinH] = useState(window.innerHeight);
@@ -324,10 +375,36 @@ function AppInner() {
     invoke<VersionInfo[]>("mc_versions").then(setVinfo).catch((e) => add(`Could not load versions: ${e}`));
 
   useEffect(() => {
-    invoke<AccList>("list_accounts").then(applyList);
+    // all settings now live in game/launcher/config/settings.json on the backend
+    invoke<any>("load_settings").then((d) => {
+      if (d.msClientId !== undefined) setMsClientId(d.msClientId);
+      if (d.cfKey !== undefined) setCfKey(d.cfKey);
+      if (d.ram !== undefined) setRam(d.ram);
+      if (d.java !== undefined) setJava(d.java);
+      if (d.instance !== undefined) setInstId(d.instance);
+      if (d.settings !== undefined) {
+        const loadedSettings = { ...DEFAULTS, ...d.settings };
+        setSt(loadedSettings);
+        setInstanceDirectoryDraft(loadedSettings.instanceDirectory);
+      }
+      if (d.skins !== undefined) setSkins(d.skins);
+      if (d.showCrashReports !== undefined) setShowCrashReports(d.showCrashReports);
+      if (d.startup !== undefined) setStartup(d.startup === true);
+      else if (d.firstRunComplete !== undefined) setStartup(d.firstRunComplete === true);
+      loadedRef.current = true;
+    }).catch((e) => {
+      add(`Could not load settings: ${e}`);
+      loadedRef.current = true;
+    }).finally(() => setSettingsLoaded(true));
+
+    invoke<AccList>("list_accounts").then(applyList).catch((e) => {
+      add(`Could not load accounts: ${e}`);
+    });
     invoke<Instance[]>("list_instances").then((l) => {
       setInstances(l);
       setInstId((cur) => (l.some((i) => i.id === cur) ? cur : l[0]?.id ?? ""));
+    }).catch((e) => {
+      add(`Could not load instances: ${e}`);
     });
     loadVersions();
     invoke<number>("system_ram").then(setSysRam).catch(() => {});
@@ -338,12 +415,23 @@ function AppInner() {
     return () => { subs.forEach((p) => p.then((un) => un())); };
   }, []);
 
-  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [log, page]);
   useEffect(() => {
-    Object.entries({ msClientId, cfKey, ram: String(ram), java, instance: instId })
-      .forEach(([k, v]) => localStorage.setItem(k, v));
-  }, [msClientId, cfKey, ram, java, instId]);
-  useEffect(() => { localStorage.setItem("settings", JSON.stringify(st)); }, [st]);
+    if (settingsLoaded) setFirstRunOpen(!startup);
+  }, [settingsLoaded, startup]);
+
+  useEffect(() => {
+    configureDownloads(st.downloadConcurrency, st.autoClearDownloads);
+  }, [configureDownloads, st.downloadConcurrency, st.autoClearDownloads]);
+
+  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [log, page]);
+
+  // persist everything together into game/launcher/config/settings.json
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    invoke("save_settings", {
+      data: { msClientId, cfKey, ram, java, instance: instId, settings: st, skins, showCrashReports, startup },
+    }).catch((e) => add(`Could not save settings: ${e}`));
+  }, [msClientId, cfKey, ram, java, instId, st, skins, showCrashReports, startup]);
 
   // Interface size: CSS zoom, with the shell height divided by the zoom so it still fills the window
   useEffect(() => {
@@ -372,11 +460,7 @@ function AppInner() {
       invoke<Skin>("get_skin", { kind: a.kind, username: a.username, uuid: a.uuid })
         .then((sk) => {
           if (!sk) return;
-          setSkins((prev) => {
-            const n = { ...prev, [a.id]: sk };
-            localStorage.setItem("skins", JSON.stringify(n));
-            return n;
-          });
+          setSkins((prev) => ({ ...prev, [a.id]: sk }));
         })
         .catch(() => {});
     });
@@ -385,6 +469,23 @@ function AppInner() {
   const inst = instances.find((i) => i.id === instId) ?? null;
   const current = accounts.find((a) => a.id === selected) ?? null;
   const effRam = st.ramAuto ? autoRam(sysRam, inst?.loader ?? "vanilla") : ram;
+
+  useEffect(() => {
+    if (!inst?.background) {
+      setActiveBackground("");
+      return;
+    }
+    let active = true;
+    invoke<string | null>("load_instance_background", { id: inst.id })
+      .then((background) => { if (active) setActiveBackground(background ?? ""); })
+      .catch((e) => {
+        if (active) {
+          setActiveBackground("");
+          add(`Could not load instance background: ${e}`);
+        }
+      });
+    return () => { active = false; };
+  }, [inst?.id, inst?.background]);
 
   const visible = useMemo(() => vinfo.filter((v) => {
     if (v.kind === "release") return true;
@@ -395,6 +496,13 @@ function AppInner() {
     return false;
   }), [vinfo, st]);
   const filtered = visible.filter((v) => v.id.includes(filter)).slice(0, 300);
+  const firstRunMc = wMc || vinfo.find((v) => v.kind === "release")?.id || "";
+
+  useEffect(() => {
+    if (firstRunOpen && vinfo.length > 0 && !wMc) {
+      setWMc(vinfo.find((v) => v.kind === "release")?.id ?? vinfo[0].id);
+    }
+  }, [firstRunOpen, vinfo, wMc]);
 
   // progress of the current download (looks back to the last "start" line)
   const progress = useMemo(() => {
@@ -412,10 +520,14 @@ function AppInner() {
     setBusy(true);
     setMsCode(null);
     try {
+      const gameArgs = st.launchFullscreen && !/(^|\s)--fullscreen(?:\s|$)/i.test(st.gameArgs)
+        ? `${st.gameArgs} --fullscreen`.trim()
+        : st.gameArgs;
       await invoke("play", {
         req: {
           instance: inst.id, ram: effRam, java: java || "java", ms_client_id: msClientId,
-          jvm_args: st.jvmArgs, game_args: st.gameArgs, hide: st.hide,
+          java_mode: st.javaRuntime,
+          jvm_args: st.jvmArgs, game_args: gameArgs, hide: st.hide,
           volume: st.volumeOn ? st.volume : null,
         },
       });
@@ -429,7 +541,7 @@ function AppInner() {
     }
   };
 
-  const addAccount = async () => {
+  const addAccount = async (): Promise<boolean> => {
     setAddBusy(true);
     setAddErr("");
     setMsCode(null);
@@ -440,11 +552,109 @@ function AppInner() {
       applyList(r);
       setAddUser("");
       setAddPass("");
+      return true;
     } catch (e) {
       setAddErr(String(e));
+      return false;
     } finally {
       setAddBusy(false);
       setMsCode(null);
+    }
+  };
+  const firstRunLogin = async () => {
+    setFirstRunError("");
+    if (await addAccount()) setFirstRunStep(2);
+  };
+  const firstRunInstall = async () => {
+    const mc = wMc || vinfo.find((v) => v.kind === "release")?.id || "";
+    if (!mc) {
+      setFirstRunError("Minecraft versions are not available yet. Try again in a moment.");
+      return;
+    }
+    setFirstRunBusy(true);
+    setFirstRunError("");
+    try {
+      const list = await invoke<Instance[]>("create_instance", {
+        req: {
+          name: wName.trim() || `${cap(wLoader)} ${mc}`,
+          loader: wLoader,
+          mc,
+          java: java || "java",
+          java_mode: st.javaRuntime,
+          icon: "",
+          description: "",
+          background: "",
+        },
+      });
+      setInstances(list);
+      setInstId(list[list.length - 1]?.id ?? "");
+      setFirstRunStep(3);
+    } catch (e) {
+      setFirstRunError(String(e));
+    } finally {
+      setFirstRunBusy(false);
+    }
+  };
+  const finishFirstRun = async () => {
+    setFirstRunError("");
+    try {
+      await invoke("save_settings", {
+        data: { msClientId, cfKey, ram, java, instance: instId, settings: st, skins, showCrashReports, startup: true },
+      });
+      setStartup(true);
+      setFirstRunOpen(false);
+    } catch (e) {
+      setFirstRunError(`Could not save setup: ${e}`);
+    }
+  };
+
+  const chooseInstanceDirectory = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose an instance folder",
+        defaultPath: instanceDirectoryDraft || undefined,
+      });
+      if (typeof selected === "string") {
+        setInstanceDirectoryDraft(selected);
+        setInstanceDirectoryMessage("");
+      }
+    } catch (error) {
+      setInstanceDirectoryMessage(`Could not open folder picker: ${error}`);
+    }
+  };
+
+  const changeInstanceDirectory = async () => {
+    setInstanceDirectoryBusy(true);
+    setInstanceDirectoryMessage("");
+    try {
+      const result = await invoke<{ path: string; warning?: string | null }>("set_instance_directory", {
+        path: instanceDirectoryDraft,
+      });
+      setInstanceDirectoryDraft(result.path);
+      set("instanceDirectory", result.path);
+      const alreadySet = st.instanceDirectory.toLowerCase() === result.path.toLowerCase();
+      setInstanceDirectoryMessage(result.warning ?? (alreadySet
+        ? "This is already the active instance folder."
+        : "Instance folder changed. Existing instances were moved when present."));
+    } catch (error) {
+      setInstanceDirectoryMessage(`Could not change instance folder: ${error}`);
+    } finally {
+      setInstanceDirectoryBusy(false);
+    }
+  };
+  const downloadJavaRuntime = async () => {
+    if (!inst) return;
+    setJavaRuntimeBusy(true);
+    setJavaRuntimeMessage("");
+    try {
+      await invoke<string>("download_java_runtime", { mcVersion: inst.mc });
+      setJavaRuntimeMessage(`Java runtime for Minecraft ${inst.mc} is ready. It is stored separately from system Java.`);
+    } catch (error) {
+      setJavaRuntimeMessage(`Could not download Java runtime: ${error}`);
+    } finally {
+      setJavaRuntimeBusy(false);
     }
   };
   const select = (id: string) => invoke<AccList>("select_account", { id }).then(applyList);
@@ -462,7 +672,7 @@ function AppInner() {
     setStep(4);
     try {
       const list = await invoke<Instance[]>("create_instance", {
-        req: { name: wName, loader: wLoader, mc: wMc, java: java || "java", icon: wIcon, description: wDesc, background: wBg },
+        req: { name: wName, loader: wLoader, mc: wMc, java: java || "java", java_mode: st.javaRuntime, icon: wIcon, description: wDesc, background: wBg },
       });
       setInstances(list);
       setInstId(list[list.length - 1].id);
@@ -473,15 +683,25 @@ function AppInner() {
     }
   };
 
-  const startEdit = (i: Instance) => {
-    setEditId(i.id); setEditName(i.name); setEditIcon(i.icon);
-    setEditDesc(i.description); setEditBg(i.background); setDelId(null);
+  const startEdit = async (i: Instance) => {
+    setEditId(null);
+    setEditName(i.name); setEditIcon(i.icon);
+    setEditDesc(i.description); setEditBg(""); setDelId(null);
+    try {
+      setEditBg(await invoke<string | null>("load_instance_background", { id: i.id }) ?? "");
+      setEditId(i.id);
+    } catch (e) {
+      add(`Could not load instance background: ${e}`);
+      setPage("console");
+    }
   };
   const saveEdit = async () => {
     try {
-      setInstances(await invoke<Instance[]>("edit_instance", {
+      const updated = await invoke<Instance[]>("edit_instance", {
         req: { id: editId, name: editName, icon: editIcon, description: editDesc, background: editBg },
-      }));
+      });
+      setInstances(updated);
+      setActiveBackground(editBg);
       setEditId(null);
     } catch (e) { add(`ERROR: ${e}`); setPage("console"); }
   };
@@ -494,50 +714,234 @@ function AppInner() {
     } catch (e) { add(`ERROR: ${e}`); setPage("console"); }
   };
 
-  // custom logo/background: pick an image; logos are cropped square to 96x96, backgrounds shrink to fit 960px wide
+  // custom logo/background: pick a file. Logos are cropped square to 96x96 PNG.
+  // Backgrounds: static images (png/jpg) are shrunk to fit 960px wide JPEG; an animated
+  // gif is kept as-is (unprocessed), since resizing through canvas would flatten it to
+  // a single frame and lose the animation.
   const fileFor = useRef<"logo-new" | "logo-edit" | "bg-new" | "bg-edit">("logo-new");
-  const pickFile = (target: "logo-new" | "logo-edit" | "bg-new" | "bg-edit") => { fileFor.current = target; fileRef.current?.click(); };
+  const pickFile = (target: "logo-new" | "logo-edit" | "bg-new" | "bg-edit") => {
+    fileFor.current = target;
+    if (fileRef.current) {
+      fileRef.current.accept = target === "bg-new" || target === "bg-edit"
+        ? "image/png,image/jpeg,image/gif"
+        : "image/*";
+    }
+    fileRef.current?.click();
+  };
   const onFile = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f) return;
     const target = fileFor.current;
+    const isBg = target === "bg-new" || target === "bg-edit";
+
+    const apply = (url: string) => {
+      if (target === "logo-new") setWIcon(url);
+      else if (target === "logo-edit") setEditIcon(url);
+      else if (target === "bg-new") setWBg(url);
+      else setEditBg(url);
+    };
+
+    // Keep GIF bytes untouched so their animation is preserved even when the picker omits MIME type.
+    if (isBg && (f.type.toLowerCase() === "image/gif" || /\.gif$/i.test(f.name))) {
+      const rd = new FileReader();
+      rd.onload = () => {
+        if (typeof rd.result !== "string" || !rd.result.startsWith("data:")) {
+          add(`Could not read ${f.name} as a GIF image.`);
+          return;
+        }
+        const encoded = rd.result.split(",", 2)[1];
+        if (!encoded) {
+          add(`Could not read ${f.name} as a GIF image.`);
+          return;
+        }
+        const dataUrl = `data:image/gif;base64,${encoded}`;
+        const img = new Image();
+        img.onload = () => apply(dataUrl);
+        img.onerror = () => add(`Could not decode ${f.name} as a GIF image.`);
+        img.src = dataUrl;
+      };
+      rd.onerror = () => add(`Could not read ${f.name}: ${rd.error?.message ?? "file read failed"}`);
+      rd.readAsDataURL(f);
+      return;
+    }
+
+    // static images: crop/resize through canvas as before
     const rd = new FileReader();
     rd.onload = () => {
+      if (typeof rd.result !== "string") {
+        add(`Could not read ${f.name} as an image.`);
+        return;
+      }
       const img = new Image();
       img.onload = () => {
         const cv = document.createElement("canvas");
         let url: string;
-        if (target === "bg-new" || target === "bg-edit") {
+        if (isBg) {
           const W = 960, H = Math.round((img.height / img.width) * W);
           cv.width = W; cv.height = H;
-          cv.getContext("2d")!.drawImage(img, 0, 0, W, H);
+          const ctx = cv.getContext("2d");
+          if (!ctx) {
+            add(`Could not process ${f.name}: image canvas is unavailable.`);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, W, H);
           url = cv.toDataURL("image/jpeg", 0.85);
         } else {
           const S = 96;
           cv.width = S; cv.height = S;
           const m = Math.min(img.width, img.height);
-          cv.getContext("2d")!.drawImage(img, (img.width - m) / 2, (img.height - m) / 2, m, m, 0, 0, S, S);
+          const ctx = cv.getContext("2d");
+          if (!ctx) {
+            add(`Could not process ${f.name}: image canvas is unavailable.`);
+            return;
+          }
+          ctx.drawImage(img, (img.width - m) / 2, (img.height - m) / 2, m, m, 0, 0, S, S);
           url = cv.toDataURL("image/png");
         }
-        if (target === "logo-new") setWIcon(url);
-        else if (target === "logo-edit") setEditIcon(url);
-        else if (target === "bg-new") setWBg(url);
-        else setEditBg(url);
+        apply(url);
       };
-      img.src = String(rd.result);
+      img.onerror = () => add(`Could not decode ${f.name} as an image.`);
+      img.src = rd.result;
     };
+    rd.onerror = () => add(`Could not read ${f.name}: ${rd.error?.message ?? "file read failed"}`);
     rd.readAsDataURL(f);
   };
 
   const shownName = current?.username ?? "No account";
   const skin = `https://mc-heads.net/body/${encodeURIComponent(shownName)}/220`;
   const nav: [Page, string, string][] = [
-    ["play", "play", "Home"], ["account", "user", "Accounts"], ["versions", "grid", "Download"], ["mods", "puzzle", "Mods"], ["console", "term", "Console"],
+    ["play", "play", "Home"], ["account", "user", "Accounts"], ["versions", "grid", "Download"], ["mods", "puzzle", "Downloader"], ["console", "term", "Console"],
   ];
 
   return (
     <div className="shell" style={{ height: winH / (st.uiScale / 100) }}>
+      {firstRunOpen && (
+        <div className="onboarding-overlay">
+          <section className="onboarding-card" aria-labelledby="onboarding-title">
+            <header className="onboarding-brand">
+              <span className="onboarding-logo"><Icon n="cube" /></span>
+              <div><b>Arca Launcher</b><span>FIRST-TIME SETUP</span></div>
+            </header>
+            <div className="onboarding-progress" aria-label={`Setup step ${firstRunStep + 1} of 4`}>
+              {["Welcome", "Login", "Instance", "Done"].map((label, index) => (
+                <div key={label} className={"onboarding-progress-step" + (index === firstRunStep ? " active" : "") + (index < firstRunStep ? " complete" : "")}>
+                  <span>{index < firstRunStep ? "✓" : index + 1}</span>{label}
+                </div>
+              ))}
+            </div>
+
+            {firstRunStep === 0 && (
+              <div className="onboarding-content onboarding-welcome">
+                <span className="onboarding-art"><Icon n="cube" /></span>
+                <span className="eyebrow">YOUR MINECRAFT, YOUR WAY</span>
+                <h1 id="onboarding-title">Welcome to Arca</h1>
+                <p>Let’s get your launcher ready. Sign in with an account, then create your first Minecraft instance. You can skip either step and set it up later.</p>
+                <button className="btn purple onboarding-primary" onClick={() => { setFirstRunError(""); setFirstRunStep(1); }}>Get started <span>→</span></button>
+              </div>
+            )}
+
+            {firstRunStep === 1 && (
+              <div className="onboarding-content">
+                <span className="eyebrow">STEP 1 OF 2</span>
+                <h1 id="onboarding-title">Choose how to sign in</h1>
+                <p className="onboarding-description">Use an existing account or create an offline profile. You can add more accounts later.</p>
+                <div className="onboarding-account-types">
+                  {(["offline", "microsoft", "elyby"] as const).map((kind) => (
+                    <button key={kind} className={"onboarding-account-type" + (addKind === kind ? " active" : "")} onClick={() => { setAddKind(kind); setAddErr(""); setFirstRunError(""); }}>
+                      <span>{kind === "offline" ? "◉" : kind === "microsoft" ? "▦" : "✦"}</span>
+                      <b>{KIND_LABEL[kind]}</b>
+                      <small>{kind === "offline" ? "No online sign-in" : kind === "microsoft" ? "Official Microsoft login" : "Ely.by account"}</small>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="onboarding-login-fields">
+                  {addKind === "offline" && (<>
+                    <label>Username</label>
+                    <input value={addUser} onChange={(e) => setAddUser(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void firstRunLogin()} autoComplete="username" />
+                  </>)}
+                  {addKind === "elyby" && (<>
+                    <label>Username or email</label>
+                    <input value={addUser} onChange={(e) => setAddUser(e.target.value)} autoComplete="username" />
+                    <label>Password <span className="field-note">For 2FA, use password:2FACODE</span></label>
+                    <input type="password" value={addPass} onChange={(e) => setAddPass(e.target.value)} autoComplete="current-password" />
+                  </>)}
+                  {addKind === "microsoft" && (<>
+                    <label>Azure client ID</label>
+                    <input value={msClientId} onChange={(e) => setMsClientId(e.target.value)} placeholder="Your Microsoft application client ID" />
+                    <p className="hint onboarding-login-hint">A browser window will open to complete Microsoft sign-in.</p>
+                  </>)}
+                </div>
+
+                {msCode && addBusy && <div className="code onboarding-code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
+                {(firstRunError || addErr) && <div className="err">{firstRunError || addErr}</div>}
+                <footer className="onboarding-actions">
+                  <button className="mini" onClick={() => { setFirstRunError(""); setFirstRunStep(0); }} disabled={addBusy}>Back</button>
+                  <button className="onboarding-skip" onClick={() => { setFirstRunError(""); setFirstRunStep(2); }} disabled={addBusy}>Continue without signing in</button>
+                  <button className="btn purple" onClick={() => void firstRunLogin()} disabled={addBusy}>
+                    {addBusy ? "Signing in..." : addKind === "offline" ? "Add account" : "Sign in"}
+                  </button>
+                </footer>
+              </div>
+            )}
+
+            {firstRunStep === 2 && (
+              <div className="onboarding-content onboarding-instance">
+                <span className="eyebrow">STEP 2 OF 2</span>
+                <h1 id="onboarding-title">Install your first instance</h1>
+                <p className="onboarding-description">Choose a Minecraft release and loader. This can take a few minutes to download.</p>
+                <label>Minecraft version</label>
+                <select value={firstRunMc} onChange={(e) => { setWMc(e.target.value); setFirstRunError(""); }}>
+                  {vinfo.filter((v) => v.kind === "release").map((v) => <option key={v.id} value={v.id}>{v.id} · Release</option>)}
+                </select>
+                {!vinfo.length && <p className="hint">Loading Minecraft versions...</p>}
+                <label>Mod loader</label>
+                <div className="onboarding-loaders">
+                  {LOADERS.map((loader) => {
+                    const supported = loader === "vanilla" || (support !== null && support.includes(loader));
+                    return (
+                      <button key={loader} className={"onboarding-loader" + (wLoader === loader ? " active" : "")}
+                        disabled={!supported} onClick={() => setWLoader(loader)}>
+                        <LoaderIcon loader={loader} size={30} />
+                        <span><b>{cap(loader)}</b><small>{supported ? SHORT[loader] : support === null ? "Checking compatibility..." : "Not available for this version"}</small></span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <label>Instance name <span className="field-note">Optional</span></label>
+                <input value={wName} onChange={(e) => setWName(e.target.value)} placeholder={`${cap(wLoader)} ${firstRunMc}`} />
+                {firstRunError && <div className="err">{firstRunError}</div>}
+                {firstRunBusy && (
+                  <div className="onboarding-download">
+                    <span>{status}</span>
+                    <div className="pbar"><span style={{ width: `${progress?.pct ?? 5}%` }} /></div>
+                    {progress && <small>{progress.label} {progress.pct}%</small>}
+                  </div>
+                )}
+                <footer className="onboarding-actions">
+                  <button className="mini" onClick={() => { setFirstRunError(""); setFirstRunStep(1); }} disabled={firstRunBusy}>Back</button>
+                  <button className="onboarding-skip" onClick={() => { setFirstRunError(""); setFirstRunStep(3); }} disabled={firstRunBusy}>Skip for now</button>
+                  <button className="btn purple" onClick={() => void firstRunInstall()} disabled={firstRunBusy || !firstRunMc || (wLoader !== "vanilla" && !support?.includes(wLoader))}>
+                    {firstRunBusy ? "Installing..." : "Install instance"}
+                  </button>
+                </footer>
+              </div>
+            )}
+
+            {firstRunStep === 3 && (
+              <div className="onboarding-content onboarding-welcome">
+                <span className="onboarding-art onboarding-success">✓</span>
+                <span className="eyebrow">YOU’RE ALL SET</span>
+                <h1 id="onboarding-title">Ready to play</h1>
+                <p>{current ? `Signed in as ${current.username}.` : "You can sign in any time from Accounts."} {inst ? `${inst.name} is ready to launch.` : "Create an instance whenever you’re ready."}</p>
+                {firstRunError && <div className="err">{firstRunError}</div>}
+                <button className="btn purple onboarding-primary" onClick={() => void finishFirstRun()}>Start using Arca <span>→</span></button>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
       <input ref={fileRef} type="file" accept="image/*" onChange={onFile} style={{ display: "none" }} />
       <header className="topbar">
         <div className="logo"><Icon n="cube" /></div>
@@ -568,8 +972,8 @@ function AppInner() {
           {page === "play" && (
             <>
               <div className="top">
-                <section className={"hero" + (inst?.background ? " has-bg" : "")}
-                  style={inst?.background ? ({ ["--bg" as any]: `url(${inst.background})` }) : undefined}>
+                <section className={"hero" + (activeBackground ? " has-bg" : "")}>
+                  {activeBackground && <BgPreview className="hero-background" src={activeBackground} />}
                   <div className="pickwrap">
                     <button className="instpick" onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}>
                       {inst ? (<><InstIcon inst={inst} size={22} /><span>{inst.name}</span></>) : <span>No instance</span>}
@@ -618,7 +1022,6 @@ function AppInner() {
                   ) : <div className="skin ph" />}
                   <div className="pname">{shownName}</div>
                   <button className="btn purple" onClick={() => setPage("account")}>Manage Account</button>
-                  <button className="btn ghost" onClick={() => setPage("versions")}>Change Version</button>
                 </aside>
 
                 <section className="changelog">
@@ -636,57 +1039,79 @@ function AppInner() {
           )}
 
           {page === "account" && (
-            <section className="panel">
-              <h2>Accounts</h2>
-              <div className="alist">
-                {accounts.length === 0 && <p className="hint">No accounts yet. Add one below.</p>}
-                {accounts.map((a) => (
-                  <div key={a.id} className={"acc" + (a.id === selected ? " on" : "")}>
-                    <Avatar acc={a} skin={skins[a.id] ?? null} />
-                    <div className="ainfo"><b>{a.username}</b><span>{KIND_LABEL[a.kind]}</span></div>
-                    {a.id === selected
-                      ? <span className="badge">Selected</span>
-                      : <button className="mini" onClick={() => select(a.id)}>Select</button>}
-                    <button className="mini danger" onClick={() => remove(a.id)}>Remove</button>
+            <section className="panel account-page">
+              <header className="page-heading">
+                <div><span className="eyebrow">PLAYER PROFILE</span><h2>Accounts</h2>
+                  <p>Choose who you want to play as and manage your sign-in methods.</p></div>
+                <span className="count-chip">{accounts.length} {accounts.length === 1 ? "account" : "accounts"}</span>
+              </header>
+
+              <div className="account-layout">
+                <section className="account-section">
+                  <div className="section-heading">
+                    <div><h3>Your accounts</h3><p>The selected account will be used when you launch Minecraft.</p></div>
                   </div>
-                ))}
+                  <div className="alist">
+                    {accounts.length === 0 && (
+                      <div className="account-empty"><span className="empty-avatar"><Icon n="user" /></span>
+                        <b>No accounts yet</b><p>Add an account to get started.</p></div>
+                    )}
+                    {accounts.map((a) => (
+                      <div key={a.id} className={"acc" + (a.id === selected ? " on" : "")}>
+                        <Avatar acc={a} skin={skins[a.id] ?? null} />
+                        <div className="ainfo"><b>{a.username}</b><span>{KIND_LABEL[a.kind]}</span></div>
+                        {a.id === selected
+                          ? <span className="badge">Selected</span>
+                          : <button className="mini" onClick={() => select(a.id)}>Select</button>}
+                        <button className="mini danger" onClick={() => remove(a.id)}>Remove</button>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="account-section add-account">
+                  <div className="section-heading">
+                    <div><h3>Add an account</h3><p>Connect a new profile to your launcher.</p></div>
+                  </div>
+                  <div className="seg">
+                    {KINDS.map(([k, l]) => (
+                      <button key={k} className={addKind === k ? "on" : ""} onClick={() => { setAddKind(k); setAddErr(""); }}>{l}</button>
+                    ))}
+                  </div>
+
+                  {addKind === "offline" && (<>
+                    <label>Username <span className="field-note">Added instantly</span></label>
+                    <input value={addUser} onChange={(e) => setAddUser(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAccount()} />
+                  </>)}
+                  {addKind === "elyby" && (<>
+                    <label>Ely.by username / email</label>
+                    <input value={addUser} onChange={(e) => setAddUser(e.target.value)} />
+                    <label>Password <span className="field-note">For 2FA, use password:2FACODE</span></label>
+                    <input type="password" value={addPass} onChange={(e) => setAddPass(e.target.value)} />
+                  </>)}
+                  {addKind === "microsoft" && (
+                    <p className="hint account-notice">
+                      A browser window opens with a code to enter. {msClientId.trim() ? "" : "Set your Azure client ID in Settings first."}
+                    </p>
+                  )}
+
+                  {msCode && addBusy && <div className="code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
+                  {addErr && <div className="err">{addErr}</div>}
+                  <button className="btn purple addbtn" disabled={addBusy} onClick={addAccount}>
+                    {addBusy ? "Waiting..." : addKind === "offline" ? "Add account" : addKind === "elyby" ? "Sign in & add" : "Sign in with Microsoft"}
+                  </button>
+                </section>
               </div>
-
-              <h3>Add account</h3>
-              <div className="seg">
-                {KINDS.map(([k, l]) => (
-                  <button key={k} className={addKind === k ? "on" : ""} onClick={() => { setAddKind(k); setAddErr(""); }}>{l}</button>
-                ))}
-              </div>
-
-              {addKind === "offline" && (<>
-                <label>Username (added instantly)</label>
-                <input value={addUser} onChange={(e) => setAddUser(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAccount()} />
-              </>)}
-              {addKind === "elyby" && (<>
-                <label>Ely.by username / email</label>
-                <input value={addUser} onChange={(e) => setAddUser(e.target.value)} />
-                <label>Password (use password:2FACODE if 2FA is on)</label>
-                <input type="password" value={addPass} onChange={(e) => setAddPass(e.target.value)} />
-              </>)}
-              {addKind === "microsoft" && (
-                <p className="hint">
-                  A browser window opens with a code to enter. {msClientId.trim() ? "" : "Set your Azure client ID in Settings first."}
-                </p>
-              )}
-
-              {msCode && addBusy && <div className="code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
-              {addErr && <div className="err">{addErr}</div>}
-              <button className="btn purple addbtn" disabled={addBusy} onClick={addAccount}>
-                {addBusy ? "Waiting..." : addKind === "offline" ? "Add account" : addKind === "elyby" ? "Sign in & add" : "Sign in with Microsoft"}
-              </button>
             </section>
           )}
 
           {page === "versions" && (
             <section className="panel">
               <div className="ptop">
-                <h2>Instances</h2>
+                <div className="page-heading compact">
+                  <div><span className="eyebrow">YOUR LIBRARY</span><h2>Instances</h2>
+                    <p>Keep separate Minecraft setups for every way you play.</p></div>
+                </div>
                 <div className="seg">
                   <button className={tab === "download" ? "on" : ""} onClick={() => setTab("download")}>New instance</button>
                   <button className={tab === "instances" ? "on" : ""} onClick={() => setTab("instances")}>My instances ({instances.length})</button>
@@ -748,10 +1173,10 @@ function AppInner() {
                   <label>Description (optional)</label>
                   <textarea className="desc" rows={3} value={wDesc} onChange={(e) => setWDesc(e.target.value)}
                     placeholder="What's this instance for?" />
-                  <label>Background (optional)</label>
+                  <label>Background (optional) — image or gif</label>
                   <div className="bgrow">
-                    {wBg ? <img className="bgpreview" src={wBg} alt="" /> : <div className="bgpreview ph" />}
-                    <button className="mini" onClick={() => pickFile("bg-new")}>Choose image...</button>
+                    {wBg ? <BgPreview className="bgpreview" src={wBg} /> : <div className="bgpreview ph" />}
+                    <button className="mini" onClick={() => pickFile("bg-new")}>Choose file...</button>
                     {wBg && <button className="mini" onClick={() => setWBg("")}>Remove</button>}
                   </div>
                   <p className="hint">Minecraft {wMc} · {cap(wLoader)}</p>
@@ -787,33 +1212,34 @@ function AppInner() {
 
               {tab === "instances" && (
                 <div className="ilist">
-                  {instances.length === 0 && <p className="hint">No instances yet. Use "New instance" to download one.</p>}
+                  {instances.length === 0 && (
+                    <div className="instances-empty"><span className="empty-cube"><Icon n="cube" /></span>
+                      <b>Your library is empty</b><p>Create an instance to start playing.</p>
+                      <button className="btn purple" onClick={() => setTab("download")}>Create an instance</button></div>
+                  )}
                   {instances.map((i) => (
                     <div key={i.id} className={"icard" + (i.id === instId ? " on" : "")}>
-                      <InstIcon inst={editId === i.id ? { loader: i.loader, icon: editIcon } : i} size={48} />
-                      <div className="iinfo">
-                        {editId === i.id
-                          ? <input value={editName} onChange={(e) => setEditName(e.target.value)} />
-                          : (<><b>{i.name}</b><span>Minecraft {i.mc} · {cap(i.loader)}</span></>)}
+                      <div className="icard-top">
+                        <div className="icard-art"><InstIcon inst={i} size={52} /><span>{i.mc}</span></div>
+                        {i.id === instId && <span className="badge">Selected</span>}
                       </div>
-                      {editId === i.id ? (<>
-                        <button className="mini" onClick={() => pickFile("logo-edit")}>Logo...</button>
-                        <button className="mini" onClick={() => setEditIcon("")}>Default logo</button>
-                        <input className="editdesc" placeholder="Description" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
-                        <button className="mini" onClick={() => pickFile("bg-edit")}>Background...</button>
-                        {editBg && <button className="mini" onClick={() => setEditBg("")}>Remove background</button>}
-                        <button className="mini" onClick={saveEdit}>Save</button>
-                        <button className="mini" onClick={() => setEditId(null)}>Cancel</button>
-                      </>) : delId === i.id ? (<>
-                        <span className="hint">Delete?</span>
-                        <button className="mini danger" onClick={() => removeInst(i.id, false)}>Remove</button>
-                        <button className="mini danger" onClick={() => removeInst(i.id, true)}>Remove + delete files</button>
-                        <button className="mini" onClick={() => setDelId(null)}>Cancel</button>
-                      </>) : (<>
-                        {i.id === instId ? <span className="badge">Selected</span> : <button className="mini" onClick={() => setInstId(i.id)}>Select</button>}
-                        <button className="mini" onClick={() => startEdit(i)}>Edit</button>
-                        <button className="mini danger" onClick={() => setDelId(i.id)}>Delete</button>
-                      </>)}
+                      <div className="iinfo">
+                        <b>{i.name}</b><span>{cap(i.loader)} <i /> Minecraft {i.mc}</span>
+                        {i.description && <p>{i.description}</p>}
+                      </div>
+                      <div className="icard-actions">
+                        {delId === i.id ? (<>
+                          <span className="hint">Delete?</span>
+                          <button className="mini danger" onClick={() => removeInst(i.id, false)}>Remove</button>
+                          <button className="mini danger" onClick={() => removeInst(i.id, true)}>Remove + delete files</button>
+                          <button className="mini" onClick={() => setDelId(null)}>Cancel</button>
+                        </>) : (<>
+                          <button className="mini" onClick={() => setContentInst(i)}>Content</button>
+                          {i.id !== instId && <button className="mini select-instance" onClick={() => setInstId(i.id)}>Select</button>}
+                          <button className="mini" onClick={() => startEdit(i)}>Edit</button>
+                          <button className="mini danger" onClick={() => setDelId(i.id)}>Delete</button>
+                        </>)}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -822,69 +1248,146 @@ function AppInner() {
           )}
 
           {page === "console" && (
-            <section className="panel full">
-              <h2>Console</h2>
-              <div className="log" ref={logRef}>{log.map((l, i) => <div key={i}>{l}</div>)}</div>
+            <section className="panel full console-page">
+              <header className="page-heading">
+                <div><span className="eyebrow">LIVE OUTPUT</span><h2>Console</h2>
+                  <p>Launcher activity, downloads, and game launch diagnostics.</p></div>
+                <div className="console-heading-actions">
+                  <span className="count-chip">{log.length} {log.length === 1 ? "entry" : "entries"}</span>
+                  <button className="mini" onClick={() => setLog([])} disabled={log.length === 0}>Clear log</button>
+                </div>
+              </header>
+              <div className="console-toolbar"><span className={"console-indicator" + (busy ? " active" : "")} />
+                <b>{busy ? "Operation in progress" : status}</b><span className="console-session">SESSION OUTPUT</span></div>
+              <div className="log" ref={logRef} role="log" aria-live="polite" aria-label="Launcher console output">
+                {log.length === 0
+                  ? <div className="console-empty"><span>›_</span><b>All quiet for now</b><p>Launcher activity will appear here.</p></div>
+                  : log.map((l, i) => <div key={i} className={"log-line" + (/error|failed|could not/i.test(l) ? " error" : "")}>
+                    <span className="log-index">{String(i + 1).padStart(3, "0")}</span><span>{l}</span>
+                  </div>)}
+              </div>
             </section>
           )}
 
           {page === "settings" && (
-            <section className="panel">
-              <h2>Settings</h2>
+            <section className="panel settings-page">
+              <header className="page-heading">
+                <div><span className="eyebrow">PREFERENCES</span><h2>Settings</h2>
+                  <p>Fine-tune performance, game behavior, and launcher integrations.</p></div>
+              </header>
+              <div className="settings-list">
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">▧</span><div><h3>Memory</h3><p>Choose how much RAM Minecraft can use.</p></div></div>
+                  <label className="check">
+                    <input type="checkbox" checked={st.ramAuto} onChange={(e) => set("ramAuto", e.target.checked)} />
+                    Auto ({(autoRam(sysRam, inst?.loader ?? "vanilla") / 1024).toFixed(1)} GB{sysRam ? ` of ${(sysRam / 1024).toFixed(0)} GB` : ""})
+                  </label>
+                  <label>Memory allocation <span className="field-value">{(effRam / 1024).toFixed(1)} GB</span></label>
+                  <input type="range" disabled={st.ramAuto} min={1024} max={Math.max(2048, Math.floor((sysRam || 16384) / 512) * 512)}
+                    step={512} value={ram} onChange={(e) => setRam(+e.target.value)} />
+                </section>
 
-              <h3>Memory</h3>
-              <label className="check">
-                <input type="checkbox" checked={st.ramAuto} onChange={(e) => set("ramAuto", e.target.checked)} />
-                Auto ({(autoRam(sysRam, inst?.loader ?? "vanilla") / 1024).toFixed(1)} GB{sysRam ? ` of ${(sysRam / 1024).toFixed(0)} GB` : ""})
-              </label>
-              <label>Memory: {(effRam / 1024).toFixed(1)} GB</label>
-              <input type="range" disabled={st.ramAuto} min={1024} max={Math.max(2048, Math.floor((sysRam || 16384) / 512) * 512)}
-                step={512} value={ram} onChange={(e) => setRam(+e.target.value)} />
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">⌘</span><div><h3>Game</h3><p>Runtime, launch arguments, and in-game options.</p></div></div>
+                  <label>Java runtime</label>
+                  <select value={st.javaRuntime} onChange={(e) => {
+                    set("javaRuntime", e.target.value as Settings["javaRuntime"]);
+                    setJavaRuntimeMessage("");
+                  }}>
+                    <option value="system">System Java (default)</option>
+                    <option value="launcher">Launcher-managed Java</option>
+                  </select>
+                  <p className="setting-note">
+                    System uses Java installed on Windows or available in PATH. Launcher-managed downloads a private runtime into the launcher's jre folder when needed.
+                  </p>
+                  {st.javaRuntime === "launcher" && <>
+                    <button className="btn" onClick={downloadJavaRuntime} disabled={!inst || javaRuntimeBusy}>
+                      {javaRuntimeBusy ? "Downloading Java..." : `Download Java for ${inst?.mc ?? "selected instance"}`}
+                    </button>
+                    {javaRuntimeMessage && <p className="setting-note">{javaRuntimeMessage}</p>}
+                  </>}
+                  <label>Custom Java path <span className="field-note">Leave as "java" to use the selected runtime</span></label>
+                  <input value={java} onChange={(e) => setJava(e.target.value)} />
+                  <label>JVM arguments</label>
+                  <input placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" value={st.jvmArgs} onChange={(e) => set("jvmArgs", e.target.value)} />
+                  <label>Game arguments</label>
+                  <input placeholder="--fullscreen" value={st.gameArgs} onChange={(e) => set("gameArgs", e.target.value)} />
+                  <label className="check">
+                    <input type="checkbox" checked={st.launchFullscreen} onChange={(e) => set("launchFullscreen", e.target.checked)} />
+                    Start Minecraft in fullscreen
+                  </label>
+                  <label className="check">
+                    <input type="checkbox" checked={showCrashReports} onChange={(e) => setShowCrashReports(e.target.checked)} />
+                    Show a crash report when the game crashes
+                  </label>
+                  <label className="check">
+                    <input type="checkbox" checked={st.volumeOn} onChange={(e) => set("volumeOn", e.target.checked)} />
+                    Set game master volume on launch
+                  </label>
+                  <label>Master volume <span className="field-value">{st.volume}%</span></label>
+                  <input type="range" min={0} max={100} step={5} disabled={!st.volumeOn} value={st.volume} onChange={(e) => set("volume", +e.target.value)} />
+                </section>
 
-              <h3>Game</h3>
-              <label>Java path (leave as "java" to use jre/javaruntime, then system Java)</label>
-              <input value={java} onChange={(e) => setJava(e.target.value)} />
-              <label>JVM arguments</label>
-              <input placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" value={st.jvmArgs} onChange={(e) => set("jvmArgs", e.target.value)} />
-              <label>Game arguments</label>
-              <input placeholder="--fullscreen" value={st.gameArgs} onChange={(e) => set("gameArgs", e.target.value)} />
-              <label className="check">
-              <input
-                type="checkbox"
-                defaultChecked={localStorage.getItem("launcher.showCrashReports") !== "off"}
-                onChange={(e) => localStorage.setItem("launcher.showCrashReports", e.target.checked ? "on" : "off")}
-              />
-              Show a crash report when the game crashes
-            </label>
-              <label className="check">
-                <input type="checkbox" checked={st.volumeOn} onChange={(e) => set("volumeOn", e.target.checked)} />
-                Set game master volume on launch: {st.volume}%
-              </label>
-              <input type="range" min={0} max={100} step={5} disabled={!st.volumeOn} value={st.volume} onChange={(e) => set("volume", +e.target.value)} />
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">◈</span><div><h3>Launcher</h3><p>Set the launch experience and interface scale.</p></div></div>
+                  <label>When the game starts</label>
+                  <select value={st.hide} onChange={(e) => set("hide", e.target.value as Settings["hide"])}>
+                    <option value="keep">Keep the launcher open</option>
+                    <option value="hide">Hide it until the game closes</option>
+                    <option value="close">Close the launcher</option>
+                  </select>
+                  <label>Interface size <span className="field-value">{st.uiScale}%</span></label>
+                  <input type="range" min={80} max={140} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
+                </section>
 
-              <h3>Launcher</h3>
-              <label>When the game starts</label>
-              <select value={st.hide} onChange={(e) => set("hide", e.target.value as Settings["hide"])}>
-                <option value="keep">Keep the launcher open</option>
-                <option value="hide">Hide it until the game closes</option>
-                <option value="close">Close the launcher</option>
-              </select>
-              <label>Interface size: {st.uiScale}%</label>
-              <input type="range" min={80} max={140} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">◷</span><div><h3>Version list</h3><p>Choose which Minecraft releases appear in the browser.</p></div></div>
+                  <label className="check"><input type="checkbox" checked={st.showSnapshots} onChange={(e) => set("showSnapshots", e.target.checked)} /> Snapshots</label>
+                  <label className="check"><input type="checkbox" checked={st.showExperimental} onChange={(e) => set("showExperimental", e.target.checked)} /> Experimental and special versions</label>
+                  <label className="check"><input type="checkbox" checked={st.showBeta} onChange={(e) => set("showBeta", e.target.checked)} /> Old beta</label>
+                  <label className="check"><input type="checkbox" checked={st.showAlpha} onChange={(e) => set("showAlpha", e.target.checked)} /> Old alpha</label>
+                </section>
 
-              <h3>Version list</h3>
-              <label className="check"><input type="checkbox" checked={st.showSnapshots} onChange={(e) => set("showSnapshots", e.target.checked)} /> Snapshots</label>
-              <label className="check"><input type="checkbox" checked={st.showExperimental} onChange={(e) => set("showExperimental", e.target.checked)} /> Experimental and special versions</label>
-              <label className="check"><input type="checkbox" checked={st.showBeta} onChange={(e) => set("showBeta", e.target.checked)} /> Old beta</label>
-              <label className="check"><input type="checkbox" checked={st.showAlpha} onChange={(e) => set("showAlpha", e.target.checked)} /> Old alpha</label>
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">◎</span><div><h3>Microsoft account</h3><p>Required to authenticate Microsoft accounts.</p></div></div>
+                  <label>Azure client ID</label>
+                  <input value={msClientId} onChange={(e) => setMsClientId(e.target.value)} />
+                </section>
 
-              <h3>Microsoft</h3>
-              <label>Azure client ID (needed for Microsoft accounts)</label>
-              <input value={msClientId} onChange={(e) => setMsClientId(e.target.value)} />
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">⬡</span><div><h3>CurseForge</h3><p>Optional key for browsing CurseForge content.</p></div></div>
+                  <label>CurseForge API key <span className="field-note">Free at console.curseforge.com</span></label>
+                  <input type="password" value={cfKey} onChange={(e) => setCfKey(e.target.value)} />
+                </section>
 
-              <h3>CurseForge</h3>
-              <label>CurseForge API key (free at console.curseforge.com)</label>
-              <input type="password" value={cfKey} onChange={(e) => setCfKey(e.target.value)} />
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon">▦</span><div><h3>Instances</h3><p>Manage instance storage and installation activity.</p></div></div>
+                  <label>Instance folder</label>
+                  <div className="folder-picker-row">
+                    <span className="folder-picker-path" title={displayPath(instanceDirectoryDraft) || "No folder selected"}>
+                      {displayPath(instanceDirectoryDraft) || "No folder selected"}
+                    </span>
+                    <button className="mini" onClick={chooseInstanceDirectory} disabled={instanceDirectoryBusy}>
+                      Browse…
+                    </button>
+                  </div>
+                  <button className="btn" onClick={changeInstanceDirectory} disabled={instanceDirectoryBusy || !instanceDirectoryDraft.trim()}>
+                    {instanceDirectoryBusy ? "Moving instances..." : "Move instances to folder"}
+                  </button>
+                  <p className="setting-note">Existing instances move to this folder. Choose an empty folder and keep it available while using the launcher.</p>
+                  {instanceDirectoryMessage && <p className="setting-note">{instanceDirectoryMessage}</p>}
+                  <label>Simultaneous installs <span className="field-value">{st.downloadConcurrency}</span></label>
+                  <input type="range" min={1} max={5} step={1} value={st.downloadConcurrency}
+                    onChange={(e) => set("downloadConcurrency", +e.target.value)} />
+                  <p className="setting-note">Higher values can use more bandwidth and system resources.</p>
+                  <label className="check">
+                    <input type="checkbox" checked={st.autoClearDownloads}
+                      onChange={(e) => set("autoClearDownloads", e.target.checked)} />
+                    Automatically clear completed downloads
+                  </label>
+                  <p className="setting-note">Turn this off to keep completed downloads in the tray until dismissed.</p>
+                </section>
+              </div>
             </section>
           )}
           </div>
@@ -894,6 +1397,8 @@ function AppInner() {
               inst={inst}
               cfKey={cfKey}
               java={java}
+              javaMode={st.javaRuntime}
+              active={page === "mods"}
               goSettings={() => setPage("settings")}
               onPackInstalled={(list) => {
                 const next = list.map((i) => ({
@@ -908,6 +1413,91 @@ function AppInner() {
           </div>
         </main>
       </div>
+
+      {contentInst && (
+        <Modal title={`Installed content — ${contentInst.name}`} wide onClose={() => setContentInst(null)}>
+          <ContentPage inst={contentInst} />
+        </Modal>
+      )}
+
+      {editId && (
+        <div className="editbackdrop" onClick={() => setEditId(null)}>
+          <section
+            className="editdialog pop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-instance-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="editdialoghead">
+              <div className="editdialogtitle">
+                <h2 id="edit-instance-title">Edit instance</h2>
+                <p>Customize how this instance looks in your launcher.</p>
+              </div>
+              <button className="mini editclose" type="button" aria-label="Close edit instance dialog" onClick={() => setEditId(null)}>✕</button>
+            </header>
+            <form
+              className="editdialogbody"
+              onSubmit={(e) => { e.preventDefault(); void saveEdit(); }}
+            >
+              <div className="editfield">
+                <label htmlFor="edit-instance-name">Name</label>
+                <input
+                  id="edit-instance-name"
+                  className="editinput"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  autoFocus
+                />
+              </div>
+
+              <div className="editfield">
+                <label>Logo</label>
+                <div className="editassetrow">
+                  <div className="editiconpreview">
+                    <InstIcon inst={{ loader: instances.find((x) => x.id === editId)?.loader ?? "vanilla", icon: editIcon }} size={64} />
+                  </div>
+                  <div className="editassetactions">
+                    <button className="mini" type="button" onClick={() => pickFile("logo-edit")}>Choose image...</button>
+                    <button className="mini" type="button" onClick={() => setEditIcon("")}>Use default</button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="editfield">
+                <label htmlFor="edit-instance-description">Description</label>
+                <textarea
+                  id="edit-instance-description"
+                  className="desc edittextarea"
+                  rows={4}
+                  value={editDesc}
+                  onChange={(e) => setEditDesc(e.target.value)}
+                  placeholder="What's this instance for?"
+                />
+              </div>
+
+              <div className="editfield">
+                <label>Background <span className="editoptional">Image or GIF</span></label>
+                <div className="editassetrow editbackgroundrow">
+                  {editBg
+                    ? <BgPreview className="bgpreview editbgpreview" src={editBg} />
+                    : <div className="bgpreview ph editbgpreview"><span>No background selected</span></div>}
+                  <div className="editassetactions">
+                    <button className="mini" type="button" onClick={() => pickFile("bg-edit")}>Choose file...</button>
+                    {editBg && <button className="mini" type="button" onClick={() => setEditBg("")}>Remove</button>}
+                  </div>
+                </div>
+              </div>
+
+              <footer className="btnrow editdialogfooter">
+                <button className="mini" type="button" onClick={() => setEditId(null)}>Cancel</button>
+                <button className="btn purple addbtn" type="submit" disabled={!editName.trim()}>Save changes</button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      )}
+
       <DownloadOverlay />
       <CrashWatcher />
     </div>
