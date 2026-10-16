@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { taskKey, useDownloads } from "./downloads";
+
+type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 
 export type Inst = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string };
 type Hit = { id: string; title: string; summary: string; icon: string; downloads: number; author: string; url: string };
@@ -200,7 +203,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
             <div className="mcard" key={h.id}>
               <div className="mcardtop">
                 <img className="micon" src={h.icon} width={56} height={56} alt=""
-                  onError={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = "hidden")} />
+                  onError={(e) => e.currentTarget.classList.add("is-hidden")} />
                 <div className="mcardmeta">
                   <b>{h.title}</b>
                   <span>by {h.author}</span>
@@ -231,7 +234,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
                 {isRunning ? (
                   <div className="mcardprog">
                     <div className={"pbar slim" + (t!.pct == null ? " indeterminate" : "")}>
-                      <span style={t!.pct != null ? { width: `${t!.pct}%` } : undefined} />
+                      <span style={t!.pct != null ? { "--progress-width": `${t!.pct}%` } as CSSVars : undefined} />
                     </div>
                     {t!.pct != null && <span className="dlfpct">{t!.pct}%</span>}
                   </div>
@@ -266,7 +269,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
             <div className="verpicker pop">
               <div className="vpicktop">
                 <img className="micon" src={picker.icon} width={40} height={40} alt=""
-                  onError={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = "hidden")} />
+                  onError={(e) => e.currentTarget.classList.add("is-hidden")} />
                 <b>{picker.title}</b>
                 <button className="mini" onClick={closePicker}>✕</button>
               </div>

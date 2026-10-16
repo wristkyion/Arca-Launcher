@@ -30,6 +30,31 @@ Features
 - Content Downloader — Search and download mods, modpacks, resource packs, and shader packs from Modrinth and CurseForge, with relevance, download-count, and recently-updated sorting.
 - Multi-Account Support — Manage Offline, Microsoft, and Ely.by accounts.
 - Simple Settings — Adjust memory, system or launcher-managed Java, fullscreen launch, instance storage, and install concurrency and cleanup.
+- CSS Themes — Choose a built-in theme or add a CSS-only custom theme with name and author metadata.
+
+Custom Themes
+
+Built-in themes live in `assets/themes/`. To add a custom theme, create a `.css` file in `launcher/themes/` next to the existing `launcher/config` folder, then select **Reload themes** in Settings. Each file can declare its display name and author in a CSS comment:
+
+```css
+/*
+Name: My Theme
+Author: Your Name
+*/
+
+:root {
+  --bg: #101116;
+  --panel: #15161d;
+  --panel2: #1c1e26;
+  --line: rgba(255, 255, 255, .09);
+  --purple: #64748b;
+  --green: #94a3b8;
+  --text: #e8eaf0;
+  --mute: #9a9eaa;
+}
+```
+
+Custom themes are CSS only; HTML and JavaScript are not supported. To keep themes local and prevent external resource loads, `@import`, CSS `url(...)`, and `image-set(...)` are blocked, as are CSS escape sequences; files larger than 256 KB are skipped. A theme can still override layout styles, so choose **Default** in Settings if a custom theme makes the interface difficult to use.
 
 Built With
 

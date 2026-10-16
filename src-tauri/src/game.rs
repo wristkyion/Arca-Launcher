@@ -3,6 +3,8 @@ use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
 use serde_json::Value;
 use std::collections::VecDeque;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -26,6 +28,8 @@ const OS: &str = if cfg!(windows) {
 };
 const SEP: &str = if cfg!(windows) { ";" } else { ":" };
 const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub fn http() -> reqwest::Client {
     reqwest::Client::builder()
@@ -312,7 +316,10 @@ async fn run_installer(
         app,
         "Running loader installer (this can take a few minutes)...",
     );
-    let out = tokio::process::Command::new(java)
+    let mut cmd = tokio::process::Command::new(java);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let out = cmd
         .arg("-jar")
         .arg(&jar)
         .arg("--installClient")
@@ -808,6 +815,8 @@ pub fn launch(
 
     // user JVM args come after the defaults, so e.g. their own -Xmx wins
     let mut cmd = Command::new(java);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.arg(format!("-Xmx{ram}M"))
         .args(&acc.jvm)
         .args(&jvm)

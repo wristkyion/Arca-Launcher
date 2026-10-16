@@ -1,0 +1,435 @@
+/*
+Name: Minecraft style
+Author: Arca Launcher
+*/
+
+:root[data-theme="builtin:minecraft"] {
+  --bg: #11150f;
+  --panel: #262b24;
+  --panel2: #343a31;
+  --line: #151912;
+  --purple: #3f7c31;
+  --green: #77bd4b;
+  --text: #f2f0e6;
+  --mute: #bdc4b2;
+  --mc-edge-light: rgba(255,255,255,.16);
+  --mc-edge-dark: rgba(0,0,0,.48);
+  --mc-slot: #20251e;
+}
+.verpicker{
+  background: var(--panel2)!important;
+}
+
+.editdialog{
+  background: var(--panel2)!important;
+}
+
+.console-empty > span {
+    color: #ffffff!important;
+    font: 700 22px ui-monospace, Consolas, monospace;
+}
+
+:root[data-theme="builtin:minecraft"] body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(7,10,7,.82), rgba(7,10,7,.92)),
+    repeating-linear-gradient(0deg, transparent 0 15px, rgba(255,255,255,.025) 15px 16px),
+    repeating-linear-gradient(90deg, transparent 0 15px, rgba(255,255,255,.025) 15px 16px),
+    linear-gradient(135deg, #304524, #171d16 48%, #3c3222);
+}
+
+:root[data-theme="builtin:minecraft"] .body {
+  flex-direction: column;
+  gap: 10px;
+}
+:root[data-theme="builtin:minecraft"] .content {
+  min-height: 0;
+  min-width: 0;
+}
+:root[data-theme="builtin:minecraft"] .pagewrap {
+  min-height: 0;
+}
+:root[data-theme="builtin:minecraft"] .panel {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+:root[data-theme="builtin:minecraft"] .side {
+  width: 100%;
+  min-height: 48px;
+  flex: 0 0 48px;
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 5px 8px;
+}
+:root[data-theme="builtin:minecraft"] .side > .grow { display: none; }
+:root[data-theme="builtin:minecraft"] .side > .nav {
+  width: auto;
+  min-width: max-content;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: 0;
+  border-right: 1px solid rgba(220,235,205,.22);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #d7ddce;
+  white-space: nowrap;
+}
+:root[data-theme="builtin:minecraft"] .side > .nav .ui-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  filter: brightness(0) invert(.88) sepia(.12) saturate(.55) hue-rotate(48deg);
+}
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Home"]::after { content: "Home"; }
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Accounts"]::after { content: "Account"; }
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Download"]::after { content: "Instance"; }
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Downloader"]::after { content: "Downloader"; }
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Console"]::after { content: "Console"; }
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Settings"] {
+  margin-left: auto;
+  border-right: 0;
+  border-left: 1px solid rgba(220,235,205,.22);
+}
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Settings"]::after { content: "Settings"; }
+:root[data-theme="builtin:minecraft"] .side > .nav:hover:not(.on) {
+  background: #394632;
+  box-shadow: inset 0 1px rgba(255,255,255,.1), inset 0 -1px rgba(0,0,0,.3);
+  color: #fff;
+}
+:root[data-theme="builtin:minecraft"] .side > .nav.on {
+  border-right-color: transparent;
+  background: #3f7c31;
+  box-shadow: inset 0 1px rgba(255,255,255,.22), inset 0 -1px rgba(0,0,0,.35);
+  color: #fff;
+}
+:root[data-theme="builtin:minecraft"] .side > .nav.on .ui-icon {
+  filter: brightness(0) invert(1);
+}
+
+:root[data-theme="builtin:minecraft"] .topbar,
+:root[data-theme="builtin:minecraft"] .side,
+:root[data-theme="builtin:minecraft"] .hero,
+:root[data-theme="builtin:minecraft"] .player,
+:root[data-theme="builtin:minecraft"] .changelog,
+:root[data-theme="builtin:minecraft"] .panel,
+:root[data-theme="builtin:minecraft"] .setting-card,
+:root[data-theme="builtin:minecraft"] .account-section,
+:root[data-theme="builtin:minecraft"] .menu,
+:root[data-theme="builtin:minecraft"] .icard,
+:root[data-theme="builtin:minecraft"] .acc,
+:root[data-theme="builtin:minecraft"] .mcard,
+:root[data-theme="builtin:minecraft"] .card,
+:root[data-theme="builtin:minecraft"] .onboarding-card {
+  border: 2px solid #10140f;
+  border-radius: 2px;
+  box-shadow:
+    inset 1px 1px var(--mc-edge-light),
+    inset -1px -1px var(--mc-edge-dark),
+    0 3px 0 rgba(0,0,0,.3);
+}
+
+:root[data-theme="builtin:minecraft"] .topbar,
+:root[data-theme="builtin:minecraft"] .side,
+:root[data-theme="builtin:minecraft"] .panel,
+:root[data-theme="builtin:minecraft"] .player,
+:root[data-theme="builtin:minecraft"] .changelog,
+:root[data-theme="builtin:minecraft"] .setting-card,
+:root[data-theme="builtin:minecraft"] .account-section,
+:root[data-theme="builtin:minecraft"] .onboarding-card {
+  background-color: var(--panel);
+  background-image:
+    linear-gradient(135deg, rgba(255,255,255,.035) 25%, transparent 25%),
+    linear-gradient(315deg, rgba(0,0,0,.035) 25%, transparent 25%);
+  background-size: 8px 8px;
+}
+
+:root[data-theme="builtin:minecraft"] .hero {
+  border-color: #10140f;
+  border-radius: 2px;
+  box-shadow: inset 1px 1px var(--mc-edge-light), inset -1px -1px var(--mc-edge-dark), 0 3px 0 rgba(0,0,0,.3);
+}
+:root[data-theme="builtin:minecraft"] .hero:not(.has-bg) {
+  background:
+    linear-gradient(180deg, transparent 0 72%, rgba(15,20,13,.42) 72%),
+    repeating-linear-gradient(0deg, transparent 0 15px, rgba(255,255,255,.035) 15px 16px),
+    repeating-linear-gradient(90deg, transparent 0 15px, rgba(255,255,255,.035) 15px 16px),
+    linear-gradient(145deg, #465f32, #283b24 56%, #4b3c27);
+}
+:root[data-theme="builtin:minecraft"] .hero.has-bg::before {
+  background: linear-gradient(90deg, rgba(13,18,12,.9), rgba(13,18,12,.58) 62%, rgba(13,18,12,.22));
+}
+:root[data-theme="builtin:minecraft"] .hero p { color: #e0e4d5; }
+
+:root[data-theme="builtin:minecraft"] .logo,
+:root[data-theme="builtin:minecraft"] .onboarding-logo,
+:root[data-theme="builtin:minecraft"] .onboarding-art {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background: #343a31;
+  box-shadow: inset 1px 1px var(--mc-edge-light), inset -1px -1px var(--mc-edge-dark);
+}
+:root[data-theme="builtin:minecraft"] .nav,
+:root[data-theme="builtin:minecraft"] .sq {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background: #343a31;
+  box-shadow: inset 1px 1px var(--mc-edge-light), inset -1px -1px var(--mc-edge-dark);
+}
+:root[data-theme="builtin:minecraft"] .nav.on {
+  background: #3f7c31;
+  box-shadow: inset 1px 1px rgba(255,255,255,.24), inset -1px -1px rgba(0,0,0,.38), 0 0 0 1px #92ce61;
+}
+:root[data-theme="builtin:minecraft"] .nav:hover:not(.on),
+:root[data-theme="builtin:minecraft"] .sq:hover { background: #414a3b; }
+
+:root[data-theme="builtin:minecraft"] .menu {
+  border: 2px solid #10140f;
+  border-radius: 2px;
+  background: #252b22;
+  box-shadow: inset 1px 1px rgba(255,255,255,.14), inset -1px -1px rgba(0,0,0,.5), 0 8px 20px rgba(0,0,0,.55);
+}
+:root[data-theme="builtin:minecraft"] .mitem {
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: #eef1e6;
+}
+:root[data-theme="builtin:minecraft"] .mitem:hover,
+:root[data-theme="builtin:minecraft"] .mitem.on {
+  border-color: rgba(185,222,138,.3);
+  background: #3b4c31;
+  box-shadow: inset 1px 1px rgba(255,255,255,.1), inset -1px -1px rgba(0,0,0,.3);
+}
+:root[data-theme="builtin:minecraft"] .mitem.add { color: #91d264; }
+:root[data-theme="builtin:minecraft"] .mitem small { color: #c2cbb7; }
+
+:root[data-theme="builtin:minecraft"] .btn,
+:root[data-theme="builtin:minecraft"] .mini,
+:root[data-theme="builtin:minecraft"] .seg button,
+:root[data-theme="builtin:minecraft"] .lcard,
+:root[data-theme="builtin:minecraft"] .vrow,
+:root[data-theme="builtin:minecraft"] .onboarding-account-type,
+:root[data-theme="builtin:minecraft"] .onboarding-loader {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background-color: #555c50;
+  color: var(--text);
+  box-shadow: inset 1px 1px rgba(255,255,255,.2), inset -1px -1px rgba(0,0,0,.42), 0 2px 0 rgba(0,0,0,.3);
+  text-shadow: 0 1px rgba(0,0,0,.55);
+}
+:root[data-theme="builtin:minecraft"] .btn:hover:not(:disabled),
+:root[data-theme="builtin:minecraft"] .mini:hover:not(:disabled),
+:root[data-theme="builtin:minecraft"] .seg button:hover,
+:root[data-theme="builtin:minecraft"] .lcard:hover:not(:disabled),
+:root[data-theme="builtin:minecraft"] .vrow:hover {
+  background-color: #68725f;
+  border-color: #11150f;
+  box-shadow: inset 1px 1px rgba(255,255,255,.3), inset -1px -1px rgba(0,0,0,.36), 0 2px 0 rgba(0,0,0,.3);
+}
+:root[data-theme="builtin:minecraft"] .btn.purple,
+:root[data-theme="builtin:minecraft"] .btn:not(.ghost),
+:root[data-theme="builtin:minecraft"] .launch,
+:root[data-theme="builtin:minecraft"] .seg button.on,
+:root[data-theme="builtin:minecraft"] .vrow.on,
+:root[data-theme="builtin:minecraft"] .onboarding-loader.active,
+:root[data-theme="builtin:minecraft"] .onboarding-account-type.active {
+  border-color: #192414;
+  background-color: #3f7c31;
+  color: #fff;
+  box-shadow: inset 1px 1px rgba(255,255,255,.3), inset -1px -1px rgba(0,0,0,.38), 0 2px 0 rgba(0,0,0,.35);
+}
+:root[data-theme="builtin:minecraft"] .btn.purple:hover:not(:disabled),
+:root[data-theme="builtin:minecraft"] .btn:not(.ghost):hover:not(:disabled),
+:root[data-theme="builtin:minecraft"] .launch:hover:not(:disabled),
+:root[data-theme="builtin:minecraft"] .seg button.on:hover,
+:root[data-theme="builtin:minecraft"] .vrow.on:hover {
+  background-color: #4a8937;
+}
+:root[data-theme="builtin:minecraft"] .mods-panel .mods-sources button.on,
+:root[data-theme="builtin:minecraft"] .mods-panel .mods-types button.on {
+  border-color: #24351b;
+  background: linear-gradient(180deg, #5ba342, #397a2d);
+  color: #fff;
+  box-shadow: inset 1px 1px rgba(255,255,255,.28), inset -1px -1px rgba(0,0,0,.35), 0 2px 0 rgba(0,0,0,.3);
+  text-shadow: 0 1px rgba(0,0,0,.55);
+}
+:root[data-theme="builtin:minecraft"] .mods-panel .mods-sources button:not(.on):hover,
+:root[data-theme="builtin:minecraft"] .mods-panel .mods-types button:not(.on):hover {
+  background: #46513f;
+  color: #f2f4ec;
+}
+:root[data-theme="builtin:minecraft"] .mods-panel .mcardfoot > .mini {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background: #394a30;
+  color: #d8efbd;
+  box-shadow: inset 1px 1px rgba(255,255,255,.16), inset -1px -1px rgba(0,0,0,.35);
+}
+:root[data-theme="builtin:minecraft"] .mods-panel .mcardfoot > .mini:hover {
+  background: #4b603e;
+  color: #fff;
+}
+:root[data-theme="builtin:minecraft"] .btn.ghost,
+:root[data-theme="builtin:minecraft"] .mini.danger {
+  background-color: #454a42;
+  color: #e2e4db;
+}
+:root[data-theme="builtin:minecraft"] button:focus-visible,
+:root[data-theme="builtin:minecraft"] input:focus-visible,
+:root[data-theme="builtin:minecraft"] select:focus-visible,
+:root[data-theme="builtin:minecraft"] textarea:focus-visible {
+  outline: 2px solid #b5e66f;
+  outline-offset: 2px;
+}
+
+:root[data-theme="builtin:minecraft"] .icard,
+:root[data-theme="builtin:minecraft"] .acc,
+:root[data-theme="builtin:minecraft"] .mcard {
+  background: #30372d;
+}
+:root[data-theme="builtin:minecraft"] .icard:hover,
+:root[data-theme="builtin:minecraft"] .mcard:hover { transform: none; border-color: #10140f; }
+:root[data-theme="builtin:minecraft"] .icard.on,
+:root[data-theme="builtin:minecraft"] .acc.on {
+  border-color: #8fc65a;
+  box-shadow: inset 0 0 0 1px #8fc65a, inset 1px 1px rgba(255,255,255,.18), 0 3px 0 rgba(0,0,0,.3);
+}
+:root[data-theme="builtin:minecraft"] .account-page .acc.on {
+  border-color: #8fc65a;
+  background: linear-gradient(135deg, #3c5132, #303d29);
+  box-shadow: inset 0 0 0 1px #8fc65a, inset 1px 1px rgba(255,255,255,.18), 0 3px 0 rgba(0,0,0,.3);
+}
+:root[data-theme="builtin:minecraft"] .icard-art {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 11px, rgba(255,255,255,.04) 11px 12px),
+    repeating-linear-gradient(90deg, transparent 0 11px, rgba(255,255,255,.04) 11px 12px),
+    linear-gradient(145deg, #485d35, #272f24 65%, #4d3d28);
+}
+:root[data-theme="builtin:minecraft"] .icard-actions { border-color: rgba(255,255,255,.12); }
+:root[data-theme="builtin:minecraft"] .icard-actions .select-instance,
+:root[data-theme="builtin:minecraft"] .badge,
+:root[data-theme="builtin:minecraft"] .icard-top > .badge {
+  border: 1px solid #27391e;
+  border-radius: 2px;
+  background: #3f7c31;
+  color: #fff;
+}
+:root[data-theme="builtin:minecraft"] .account-notice {
+  border: 1px solid rgba(174,211,132,.3);
+  border-radius: 2px;
+  background: #293526;
+  color: #d8e5ca;
+}
+:root[data-theme="builtin:minecraft"] .vprow.on {
+  border-color: #78a94d;
+  background: #34472c;
+  box-shadow: inset 1px 1px rgba(255,255,255,.13), inset -1px -1px rgba(0,0,0,.35);
+}
+:root[data-theme="builtin:minecraft"] .stp.on {
+  border: 1px solid #263a1e;
+  border-radius: 2px;
+  background: #3f7c31;
+  color: #fff;
+  box-shadow: inset 1px 1px rgba(255,255,255,.22), inset -1px -1px rgba(0,0,0,.35);
+}
+:root[data-theme="builtin:minecraft"] .lcard.on {
+  border-color: #8fc65a;
+  background: #3a4c31;
+  box-shadow: inset 0 0 0 1px #8fc65a, inset 1px 1px rgba(255,255,255,.12);
+}
+:root[data-theme="builtin:minecraft"] .badgebtn {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background: #4c9138;
+  color: #fff;
+  box-shadow: inset 1px 1px rgba(255,255,255,.22), inset -1px -1px rgba(0,0,0,.38);
+}
+:root[data-theme="builtin:minecraft"] .badgebtn:hover { background: #5ca844; }
+:root[data-theme="builtin:minecraft"] .clv {
+  border: 1px solid #27391e;
+  border-radius: 2px;
+  background: #3d6d2c;
+  color: #eff7e8;
+}
+
+:root[data-theme="builtin:minecraft"] input:not([type=checkbox]):not([type=range]),
+:root[data-theme="builtin:minecraft"] select,
+:root[data-theme="builtin:minecraft"] textarea,
+:root[data-theme="builtin:minecraft"] .desc,
+:root[data-theme="builtin:minecraft"] .editdesc,
+:root[data-theme="builtin:minecraft"] .folder-picker-path {
+  border: 2px solid #10140f;
+  border-radius: 2px;
+  background-color: var(--mc-slot);
+  color: var(--text);
+  box-shadow: inset 2px 2px rgba(0,0,0,.38), inset -1px -1px rgba(255,255,255,.08);
+}
+:root[data-theme="builtin:minecraft"] input[type=checkbox],
+:root[data-theme="builtin:minecraft"] input[type=range] { accent-color: #83c64c; }
+:root[data-theme="builtin:minecraft"] .setting-icon,
+:root[data-theme="builtin:minecraft"] .empty-avatar,
+:root[data-theme="builtin:minecraft"] .empty-cube {
+  border: 2px solid #11150f;
+  border-radius: 2px;
+  background: #384332;
+  color: #d1efa9;
+  box-shadow: inset 1px 1px rgba(255,255,255,.18), inset -1px -1px rgba(0,0,0,.4);
+}
+:root[data-theme="builtin:minecraft"] .page-heading { border-color: rgba(255,255,255,.16); }
+:root[data-theme="builtin:minecraft"] .eyebrow,
+:root[data-theme="builtin:minecraft"] .mods-eyebrow,
+:root[data-theme="builtin:minecraft"] .field-value,
+:root[data-theme="builtin:minecraft"] .onboarding-progress-step.complete,
+:root[data-theme="builtin:minecraft"] .onboarding-progress-step.complete > span { color: #c2ec8d; }
+:root[data-theme="builtin:minecraft"] .setting-title h3,
+:root[data-theme="builtin:minecraft"] .page-heading h2 { text-shadow: 1px 1px rgba(0,0,0,.55); }
+:root[data-theme="builtin:minecraft"] .setting-title p,
+:root[data-theme="builtin:minecraft"] .setting-note,
+:root[data-theme="builtin:minecraft"] .section-heading p { color: #c6cbbb; }
+:root[data-theme="builtin:minecraft"] .vkind,
+:root[data-theme="builtin:minecraft"] .vrow.on .vkind { color: #e8f3df; }
+:root[data-theme="builtin:minecraft"] .launch { color: #fff; }
+:root[data-theme="builtin:minecraft"] .bar,
+:root[data-theme="builtin:minecraft"] .pbar span { background: #b4e55f; }
+:root[data-theme="builtin:minecraft"] .pill,
+:root[data-theme="builtin:minecraft"] .tag,
+:root[data-theme="builtin:minecraft"] .count-chip {
+  border: 1px solid rgba(190,225,145,.35);
+  border-radius: 2px;
+  background: #343d2c;
+  color: #e6f0d8;
+}
+
+:root[data-theme="builtin:minecraft"] .console-page .log {
+  border: 2px solid #10140f;
+  border-radius: 2px;
+  background: #151a14;
+  color: #d4ddca;
+  box-shadow: inset 2px 2px rgba(0,0,0,.42);
+}
+:root[data-theme="builtin:minecraft"] .log-line { color: #d4ddca; }
+:root[data-theme="builtin:minecraft"] .log-line:hover { background: rgba(255,255,255,.06); }
+:root[data-theme="builtin:minecraft"] .console-toolbar b,
+:root[data-theme="builtin:minecraft"] .console-empty b { color: var(--text); }
+:root[data-theme="builtin:minecraft"] .console-session,
+:root[data-theme="builtin:minecraft"] .log-index { color: #9da991; }
+:root[data-theme="builtin:minecraft"] .onboarding-overlay { background: rgba(8,12,8,.88); }
+:root[data-theme="builtin:minecraft"] .onboarding-brand,
+:root[data-theme="builtin:minecraft"] .onboarding-actions { border-color: rgba(255,255,255,.14); }
+:root[data-theme="builtin:minecraft"] .onboarding-account-type,
+:root[data-theme="builtin:minecraft"] .onboarding-loader { background-color: #343a31; }
+:root[data-theme="builtin:minecraft"] .onboarding-account-type > span { color: #c2ec8d; }
+:root[data-theme="builtin:minecraft"] ::-webkit-scrollbar-thumb {
+  border: 1px solid #11150f;
+  border-radius: 0;
+  background: #59634f;
+}

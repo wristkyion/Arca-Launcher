@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, ReactNode } from "react";
+import type { ChangeEvent, CSSProperties, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -15,6 +15,23 @@ type Acc = { id: string; kind: string; username: string; uuid: string };
 type AccList = { selected: string | null; accounts: Acc[] };
 type VersionInfo = { id: string; kind: string };
 type Instance = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string; description: string; background: string };
+type ThemeInfo = { id: string; name: string; author: string; builtin: boolean };
+type ThemeCatalog = { themes: ThemeInfo[]; warnings: string[] };
+type ThemeStylesheet = { id: string; name: string; author: string; css: string };
+type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
+const BUILTIN_THEMES: ThemeInfo[] = [
+  { id: "builtin:default", name: "Default", author: "Arca Launcher", builtin: true },
+  { id: "builtin:minimal", name: "Minimal", author: "Arca Launcher", builtin: true },
+  { id: "builtin:minecraft", name: "Minecraft style", author: "Arca Launcher", builtin: true },
+];
+const DEFAULT_THEME_ID = "builtin:default";
+const normalizeThemeId = (value: unknown) => {
+  if (value === "default") return DEFAULT_THEME_ID;
+  if (value === "minimal") return "builtin:minimal";
+  if (value === "minecraft") return "builtin:minecraft";
+  if (typeof value === "string" && /^custom:[^/\\]+$/.test(value)) return value;
+  return BUILTIN_THEMES.some((theme) => theme.id === value) ? value as string : DEFAULT_THEME_ID;
+};
 
 type Settings = {
   ramAuto: boolean; jvmArgs: string; gameArgs: string;
@@ -25,6 +42,7 @@ type Settings = {
   downloadConcurrency: number; autoClearDownloads: boolean;
   instanceDirectory: string;
   javaRuntime: "system" | "launcher";
+  theme: string;
 };
 const DEFAULTS: Settings = {
   ramAuto: true, jvmArgs: "", gameArgs: "", launchFullscreen: false, hide: "keep",
@@ -33,10 +51,12 @@ const DEFAULTS: Settings = {
   downloadConcurrency: 3, autoClearDownloads: true,
   instanceDirectory: "",
   javaRuntime: "system",
+  theme: DEFAULT_THEME_ID,
 };
 
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
+  { v: "0.1.2", title: "Customized Improvements", items: ["Add custom themes", "Add new icons", "Fix terminal launch", "Add custom backgrounds from the launcher library", "Increase maximum interface scale from 135% to 200%", "Fix bugs"] },
   { v: "0.1.1", title: "Fix and Improvements", items: ["Fix and added new features mods installation", "New logo modloader", "Added background support GIF/PNG/JPG", "Added mod list installation", "Remake UI", "Added system or launcher-managed Java runtime options", "Added fullscreen launch setting", "Added instance storage folder and install queue settings", "Renamed the Downloader page and added resource pack and shader pack support"] },
   { v: "0.1.0", title: "First Release", items: ["Initial release", "Publish github repository"] },
 ];
@@ -70,18 +90,32 @@ const SHORT: Record<string, string> = {
   neoforge: "The modern Forge successor",
 };
 const ICONS: Record<string, string> = {
-  play: "M8 5v14l11-7z",
-  user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0",
-  grid: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
-  term: "M3 5h18v14H3zM7 9l3 3-3 3M12 15h5",
-  gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4",
-  refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
-  cube: "M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5",
-  puzzle: "M10 4a2 2 0 1 1 4 0v2h4v4h-2a2 2 0 1 0 0 4h2v4h-4v-2a2 2 0 1 0-4 0v2H6v-4h2a2 2 0 1 0 0-4H6V6h4z",
+  play: new URL("../assets/icons/homepage.svg", import.meta.url).href,
+  user: new URL("../assets/icons/manage-account.svg", import.meta.url).href,
+  grid: new URL("../assets/icons/instance.svg", import.meta.url).href,
+  term: new URL("../assets/icons/terminal.svg", import.meta.url).href,
+  gear: new URL("../assets/icons/settings.svg", import.meta.url).href,
+  cube: new URL("../assets/icons/instance.svg", import.meta.url).href,
+  puzzle: new URL("../assets/icons/downloader.svg", import.meta.url).href,
+  theme: new URL("../assets/icons/theme-settings.svg", import.meta.url).href,
+  memory: new URL("../assets/icons/memory-settings.svg", import.meta.url).href,
+  game: new URL("../assets/icons/game-settings.svg", import.meta.url).href,
+  launcher: new URL("../assets/icons/launcher-settings.svg", import.meta.url).href,
+  version: new URL("../assets/icons/version-settings.svg", import.meta.url).href,
+  microsoft: new URL("../assets/icons/microsoft-settings.svg", import.meta.url).href,
+  curseforge: new URL("../assets/icons/curseforge-settings.svg", import.meta.url).href,
+  instances: new URL("../assets/icons/instance-settings.svg", import.meta.url).href,
 };
-const Icon = ({ n, filled }: { n: string; filled?: boolean }) => (
-  <svg viewBox="0 0 24 24" width="20" height="20" fill={filled ? "currentColor" : "none"} stroke="currentColor"
-    strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={ICONS[n]} /></svg>
+const LAUNCHER_LOGO = new URL("../assets/icons/ics-launcher.png", import.meta.url).href;
+const LAUNCHER_BACKGROUNDS = [
+  { name: "Wilderness Bound", src: new URL("../assets/background/WildernessBound.png", import.meta.url).href },
+  { name: "Pride 2022", src: new URL("../assets/background/Pride2022.png", import.meta.url).href },
+  { name: "Java Edition", src: new URL("../assets/background/Java Edition.png", import.meta.url).href },
+  { name: "Crocs", src: new URL("../assets/background/Crocs.png", import.meta.url).href },
+  { name: "Burberry", src: new URL("../assets/background/Burberry.png", import.meta.url).href },
+];
+const Icon = ({ n }: { n: string }) => (
+  <img className="ui-icon" src={ICONS[n] ?? ICONS.instance} alt="" aria-hidden="true" />
 );
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -93,26 +127,12 @@ function BgPreview({ src, className }: { src: string; className?: string }) {
 }
 
 /** A simple centered dialog with a dark scrim backdrop. Click outside or the ✕ to close. */
-function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+function Modal({ title, onClose, children, wide = false, compact = false, overlayClassName = "" }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean; compact?: boolean; overlayClassName?: string }) {
   return (
-    <div
-      style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(2px)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
-      }}
-      onClick={onClose}
-    >
-      <div
-        style={{
-          background: "#16161d", border: "1px solid #2a2a35", borderRadius: 14,
-          width: wide ? "min(760px, 92vw)" : "min(520px, 92vw)", height: "min(760px, 86vh)", maxHeight: "86vh",
-          display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden",
-          padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h3 style={{ margin: 0 }}>{title}</h3>
+    <div className={"app-modal-backdrop" + (overlayClassName ? ` ${overlayClassName}` : "")} onClick={onClose}>
+      <div className={"app-modal-card" + (wide ? " wide" : "") + (compact ? " compact" : "")} onClick={(e) => e.stopPropagation()}>
+        <div className="app-modal-header">
+          <h3 className="app-modal-title">{title}</h3>
           <button className="mini" onClick={onClose}>✕</button>
         </div>
         {children}
@@ -159,7 +179,7 @@ function SkinCanvas({ url, slim, head, height }: { url: string; slim: boolean; h
     img.src = url;
     return () => { dead = true; };
   }, [url, slim, head]);
-  return <canvas ref={ref} width={head ? 8 : 16} height={head ? 8 : 32} className="skincv" style={{ height }} />;
+  return <canvas ref={ref} width={head ? 8 : 16} height={head ? 8 : 32} className="skincv" style={{ "--skin-height": `${height}px` } as CSSVars} />;
 }
 
 
@@ -177,15 +197,20 @@ function Cube({ tex, tw, th, s, g, d, o, at }:
     { t: `rotateX(90deg) translateZ(${(gh * s) / 2}px)`, fw: gw, fh: gd, r: [u + dp, v, w, dp] },             // top
   ];
   return (
-    <div className="cube" style={{ transform: `translate3d(${at[0] * s}px,${at[1] * s}px,${at[2] * s}px)` }}>
+    <div className="cube" style={{ "--cube-transform": `translate3d(${at[0] * s}px,${at[1] * s}px,${at[2] * s}px)` } as CSSVars}>
       {faces.map((f, i) => {
         const sx = (f.fw * s) / f.r[2], sy = (f.fh * s) / f.r[3];
         return (
           <i key={i} style={{
-            width: f.fw * s, height: f.fh * s, left: -(f.fw * s) / 2, top: -(f.fh * s) / 2,
-            transform: f.t, backgroundImage: `url(${tex})`,
-            backgroundSize: `${tw * sx}px ${th * sy}px`, backgroundPosition: `${-f.r[0] * sx}px ${-f.r[1] * sy}px`,
-          }} />
+            "--face-width": `${f.fw * s}px`,
+            "--face-height": `${f.fh * s}px`,
+            "--face-left": `${-(f.fw * s) / 2}px`,
+            "--face-top": `${-(f.fh * s) / 2}px`,
+            "--face-transform": f.t,
+            "--face-image": `url(${tex})`,
+            "--face-background-size": `${tw * sx}px ${th * sy}px`,
+            "--face-background-position": `${-f.r[0] * sx}px ${-f.r[1] * sy}px`,
+          } as CSSVars} />
         );
       })}
     </div>
@@ -211,7 +236,7 @@ function SkinModel({ data, slim, s = 5 }: { data: string; slim: boolean; s?: num
 
   return (
     <div className="stage">
-      <div className="rig" style={{ transform: `rotateX(${rot.x}deg) rotateY(${rot.y}deg)` }}>
+      <div className="rig" style={{ "--rig-transform": `rotateX(${rot.x}deg) rotateY(${rot.y}deg)` } as CSSVars}>
         <Cube {...c} g={[8, 8, 8]} d={[8, 8, 8]} o={[0, 0]} at={[0, -10 - Y, 0]} />
         <Cube {...c} g={[8, 12, 4]} d={[8, 12, 4]} o={[16, 16]} at={[0, -Y, 0]} />
         <Cube {...c} g={[aw, 12, 4]} d={[aw, 12, 4]} o={[40, 16]} at={[-ax, -Y, 0]} />
@@ -235,7 +260,7 @@ function Avatar({ acc, skin }: { acc: Acc; skin: Skin }) {
   if (skin?.data) return <SkinCanvas url={skin.data} slim={skin.slim} head height={36} />;
   if (acc.kind === "offline")
     return <img className="avimg" src={`https://mc-heads.net/avatar/${encodeURIComponent(acc.username)}/36`} alt=""
-      onError={(e) => (e.currentTarget.style.visibility = "hidden")} />;
+      onError={(e) => e.currentTarget.classList.add("is-hidden")} />;
   return <span className="avph" />;
 }
 
@@ -256,9 +281,7 @@ function LoaderIcon({ loader, size }: { loader: string; size: number }) {
     <img
       className="loadericon"
       src={LOADER_ICONS[loader] ?? LOADER_ICONS.vanilla}
-      width={size}
-      height={size}
-      style={{ borderRadius: size * 0.18 }}
+      style={{ "--icon-size": `${size}px` } as CSSVars}
       alt=""
     />
   );
@@ -266,7 +289,7 @@ function LoaderIcon({ loader, size }: { loader: string; size: number }) {
 
 function InstIcon({ inst, size }: { inst: { loader: string; icon?: string }; size: number }) {
   if (inst.icon)
-    return <img className="insticon" src={inst.icon} width={size} height={size} style={{ borderRadius: size * 0.22 }} alt="" />;
+    return <img className="insticon" src={inst.icon} style={{ "--icon-size": `${size}px` } as CSSVars} alt="" />;
   return <LoaderIcon loader={inst.loader} size={size} />;
 }
 
@@ -325,6 +348,10 @@ function AppInner() {
   const [wIcon, setWIcon] = useState("");
   const [wDesc, setWDesc] = useState("");
   const [wBg, setWBg] = useState("");
+  const [backgroundPickerOpen, setBackgroundPickerOpen] = useState(false);
+  const [showLauncherBackgrounds, setShowLauncherBackgrounds] = useState(false);
+  const [backgroundPickerError, setBackgroundPickerError] = useState("");
+  const [backgroundPickerTarget, setBackgroundPickerTarget] = useState<"new" | "edit">("new");
   const [createErr, setCreateErr] = useState("");
   const nameEdited = useRef(false);
 
@@ -340,8 +367,13 @@ function AppInner() {
   // versions + settings
   const [vinfo, setVinfo] = useState<VersionInfo[]>([]);
   const [filter, setFilter] = useState("");
+  const [versionPage, setVersionPage] = useState(1);
   const [sysRam, setSysRam] = useState(0);
   const [st, setSt] = useState<Settings>(DEFAULTS);
+  const [themeCatalog, setThemeCatalog] = useState<ThemeInfo[]>(BUILTIN_THEMES);
+  const [themesReady, setThemesReady] = useState(false);
+  const [themeWarnings, setThemeWarnings] = useState<string[]>([]);
+  const [themeError, setThemeError] = useState("");
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSt((p) => ({ ...p, [k]: v }));
   const [instanceDirectoryDraft, setInstanceDirectoryDraft] = useState("");
   const [instanceDirectoryBusy, setInstanceDirectoryBusy] = useState(false);
@@ -383,7 +415,12 @@ function AppInner() {
       if (d.java !== undefined) setJava(d.java);
       if (d.instance !== undefined) setInstId(d.instance);
       if (d.settings !== undefined) {
-        const loadedSettings = { ...DEFAULTS, ...d.settings };
+        const savedSettings = d.settings && typeof d.settings === "object" ? d.settings : {};
+        const loadedSettings = {
+          ...DEFAULTS,
+          ...savedSettings,
+          theme: normalizeThemeId(savedSettings.theme),
+        };
         setSt(loadedSettings);
         setInstanceDirectoryDraft(loadedSettings.instanceDirectory);
       }
@@ -416,6 +453,18 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
+    invoke<ThemeCatalog>("list_themes")
+      .then((catalog) => {
+        setThemeCatalog(catalog.themes);
+        setThemeWarnings(catalog.warnings);
+      })
+      .catch((e) => {
+        setThemeError(`Could not list custom themes: ${e}`);
+      })
+      .finally(() => setThemesReady(true));
+  }, []);
+
+  useEffect(() => {
     if (settingsLoaded) setFirstRunOpen(!startup);
   }, [settingsLoaded, startup]);
 
@@ -424,6 +473,43 @@ function AppInner() {
   }, [configureDownloads, st.downloadConcurrency, st.autoClearDownloads]);
 
   useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [log, page]);
+  useEffect(() => {
+    if (!themesReady) return;
+    if (!themeCatalog.some((theme) => theme.id === st.theme)) {
+      setThemeError(`The selected theme is unavailable. Switched to ${BUILTIN_THEMES[0].name}.`);
+      setSt((current) => ({ ...current, theme: DEFAULT_THEME_ID }));
+      return;
+    }
+    if (BUILTIN_THEMES.some((theme) => theme.id === st.theme)) {
+      document.documentElement.dataset.theme = st.theme;
+      document.getElementById("selected-theme")?.remove();
+      setThemeError("");
+      return;
+    }
+    let active = true;
+    invoke<ThemeStylesheet>("load_theme", { id: st.theme })
+      .then((theme) => {
+        if (!active) return;
+        let style = document.getElementById("selected-theme") as HTMLStyleElement | null;
+        if (!style) {
+          style = document.createElement("style");
+          style.id = "selected-theme";
+          document.head.appendChild(style);
+        }
+        document.documentElement.dataset.theme = theme.id;
+        style.textContent = theme.css;
+      })
+      .catch((e) => {
+        if (!active) return;
+        document.documentElement.dataset.theme = DEFAULT_THEME_ID;
+        const style = document.getElementById("selected-theme");
+        if (style) style.textContent = "";
+        setThemeError(`Could not load the selected theme; using Default. ${e}`);
+        if (st.theme !== DEFAULT_THEME_ID)
+          setSt((current) => ({ ...current, theme: DEFAULT_THEME_ID }));
+      });
+    return () => { active = false; };
+  }, [st.theme, themeCatalog, themesReady]);
 
   // persist everything together into game/launcher/config/settings.json
   useEffect(() => {
@@ -495,7 +581,11 @@ function AppInner() {
     if (v.kind === "old_alpha") return st.showAlpha;
     return false;
   }), [vinfo, st]);
-  const filtered = visible.filter((v) => v.id.includes(filter)).slice(0, 300);
+  const filtered = visible.filter((v) => v.id.includes(filter));
+  const versionsPerPage = 10;
+  const versionPageCount = Math.max(1, Math.ceil(filtered.length / versionsPerPage));
+  const currentVersionPage = Math.min(versionPage, versionPageCount);
+  const pagedVersions = filtered.slice((currentVersionPage - 1) * versionsPerPage, currentVersionPage * versionsPerPage);
   const firstRunMc = wMc || vinfo.find((v) => v.kind === "release")?.id || "";
 
   useEffect(() => {
@@ -664,6 +754,9 @@ function AppInner() {
   const resetWizard = () => {
     setStep(1); setWMc(""); setWLoader("vanilla"); setSupport(null);
     setWName(""); setWIcon(""); setWDesc(""); setWBg(""); setCreateErr(""); nameEdited.current = false;
+    setBackgroundPickerOpen(false); setShowLauncherBackgrounds(false); setBackgroundPickerError("");
+    setBackgroundPickerTarget("new");
+    setVersionPage(1);
   };
   const newInstance = () => { resetWizard(); setTab("download"); setPage("versions"); };
 
@@ -727,6 +820,28 @@ function AppInner() {
         : "image/*";
     }
     fileRef.current?.click();
+  };
+  const chooseLauncherBackground = async (src: string) => {
+    setBackgroundPickerError("");
+    try {
+      const response = await fetch(src);
+      if (!response.ok) throw new Error(`Image request failed (${response.status})`);
+      const blob = await response.blob();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string"
+          ? resolve(reader.result)
+          : reject(new Error("Could not read the selected background image"));
+        reader.onerror = () => reject(reader.error ?? new Error("Could not read the selected background image"));
+        reader.readAsDataURL(blob);
+      });
+      if (backgroundPickerTarget === "new") setWBg(dataUrl);
+      else setEditBg(dataUrl);
+      setBackgroundPickerOpen(false);
+      setShowLauncherBackgrounds(false);
+    } catch (e) {
+      setBackgroundPickerError(`Could not load the selected background: ${e}`);
+    }
   };
   const onFile = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -811,16 +926,16 @@ function AppInner() {
   const shownName = current?.username ?? "No account";
   const skin = `https://mc-heads.net/body/${encodeURIComponent(shownName)}/220`;
   const nav: [Page, string, string][] = [
-    ["play", "play", "Home"], ["account", "user", "Accounts"], ["versions", "grid", "Download"], ["mods", "puzzle", "Downloader"], ["console", "term", "Console"],
+    ["play", "play", "Home"], ["account", "user", "Accounts"], ["versions", "grid", "Instance"], ["mods", "puzzle", "Downloader"], ["console", "term", "Console"],
   ];
 
   return (
-    <div className="shell" style={{ height: winH / (st.uiScale / 100) }}>
+    <div className="shell" style={{ "--shell-height": `${winH / (st.uiScale / 100)}px` } as CSSVars}>
       {firstRunOpen && (
         <div className="onboarding-overlay">
           <section className="onboarding-card" aria-labelledby="onboarding-title">
             <header className="onboarding-brand">
-              <span className="onboarding-logo"><Icon n="cube" /></span>
+              <span className="onboarding-logo"><img className="launcher-logo-image" src={LAUNCHER_LOGO} alt="" /></span>
               <div><b>Arca Launcher</b><span>FIRST-TIME SETUP</span></div>
             </header>
             <div className="onboarding-progress" aria-label={`Setup step ${firstRunStep + 1} of 4`}>
@@ -915,7 +1030,7 @@ function AppInner() {
                 {firstRunBusy && (
                   <div className="onboarding-download">
                     <span>{status}</span>
-                    <div className="pbar"><span style={{ width: `${progress?.pct ?? 5}%` }} /></div>
+                    <div className="pbar"><span style={{ "--progress-width": `${progress?.pct ?? 5}%` } as CSSVars} /></div>
                     {progress && <small>{progress.label} {progress.pct}%</small>}
                   </div>
                 )}
@@ -942,9 +1057,9 @@ function AppInner() {
           </section>
         </div>
       )}
-      <input ref={fileRef} type="file" accept="image/*" onChange={onFile} style={{ display: "none" }} />
+      <input ref={fileRef} className="file-input-hidden" type="file" accept="image/*" onChange={onFile} />
       <header className="topbar">
-        <div className="logo"><Icon n="cube" /></div>
+        <div className="logo"><img className="launcher-logo-image" src={LAUNCHER_LOGO} alt="" /></div>
         <div className="brand">Arca Launcher</div>
         <div className="chips">
           <span className="chip"><i className="dot" />{current ? KIND_LABEL[current.kind] : "No account"}</span>
@@ -957,7 +1072,7 @@ function AppInner() {
         <nav className="side">
           {nav.map(([p, ic, label]) => (
             <button key={p} className={"nav" + (page === p ? " on" : "")} onClick={() => setPage(p)} title={label}>
-              <Icon n={ic} filled={ic === "play"} />
+              <Icon n={ic} />
             </button>
           ))}
           <div className="grow" />
@@ -967,8 +1082,7 @@ function AppInner() {
         </nav>
 
         <main className="content">
-          <div key={page === "mods" ? "__mods__" : page} className={"pagewrap " + (fade === "out" ? "out" : "in")}
-            style={page === "mods" ? { display: "none" } : undefined}>
+          <div key={page === "mods" ? "__mods__" : page} className={"pagewrap " + (fade === "out" ? "out" : "in") + (page === "mods" ? " hidden" : "")}>
           {page === "play" && (
             <>
               <div className="top">
@@ -1008,7 +1122,7 @@ function AppInner() {
                       onClick={!current ? () => setPage("account") : !inst ? newInstance : play}>
                       <b>{busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
                       <small>{busy ? status.slice(0, 34) : !current ? "You need an account to play" : !inst ? "Download a version first" : `${inst.name} · ${KIND_LABEL[current.kind]}`}</small>
-                      {busy && progress && <span className="bar" style={{ width: `${progress.pct}%` }} />}
+                      {busy && progress && <span className="bar" style={{ "--progress-width": `${progress.pct}%` } as CSSVars} />}
                     </button>
                   </div>
                 </section>
@@ -1128,15 +1242,23 @@ function AppInner() {
                 <div key={step} className="stepbox">
                 {step === 1 && (<>
                   <label>Pick a Minecraft version</label>
-                  <input placeholder="Search: 1.20, 1.21.1 ..." value={filter} onChange={(e) => setFilter(e.target.value)} />
+                  <input placeholder="Search: 1.20, 1.21.1 ..." value={filter} onChange={(e) => { setFilter(e.target.value); setVersionPage(1); }} />
                   <div className="vlist">
-                    {filtered.map((v) => (
+                    {pagedVersions.map((v) => (
                       <button key={v.id} className={"vrow " + v.kind + (v.id === wMc ? " on" : "")}
                         onClick={() => { setWMc(v.id); setStep(2); }}>
-                        <b>{v.id}</b><span className="vkind">{kindLabel(v)}</span>
+                        <span className="vrow-main"><LoaderIcon loader="vanilla" size={28} /><b>{v.id}</b></span>
+                        <span className="vkind">{kindLabel(v)}</span>
                       </button>
                     ))}
                   </div>
+                  {filtered.length > versionsPerPage && (
+                    <div className="version-pagination">
+                      <button className="mini" disabled={currentVersionPage === 1} onClick={() => setVersionPage(currentVersionPage - 1)}>← Previous</button>
+                      <span>{(currentVersionPage - 1) * versionsPerPage + 1}–{Math.min(currentVersionPage * versionsPerPage, filtered.length)} of {filtered.length} · Page {currentVersionPage} of {versionPageCount}</span>
+                      <button className="mini" disabled={currentVersionPage === versionPageCount} onClick={() => setVersionPage(currentVersionPage + 1)}>Next →</button>
+                    </div>
+                  )}
                   {vinfo.length === 0 && <p className="hint">Loading the version list...</p>}
                   {(st.showBeta || st.showAlpha) && <p className="hint">Old alpha and beta versions need Java 8 and may not start correctly.</p>}
                   {!st.showSnapshots && !st.showBeta && !st.showAlpha && !st.showExperimental && (
@@ -1173,11 +1295,15 @@ function AppInner() {
                   <label>Description (optional)</label>
                   <textarea className="desc" rows={3} value={wDesc} onChange={(e) => setWDesc(e.target.value)}
                     placeholder="What's this instance for?" />
-                  <label>Background (optional) — image or gif</label>
+                  <label>Background (optional)</label>
                   <div className="bgrow">
                     {wBg ? <BgPreview className="bgpreview" src={wBg} /> : <div className="bgpreview ph" />}
-                    <button className="mini" onClick={() => pickFile("bg-new")}>Choose file...</button>
-                    {wBg && <button className="mini" onClick={() => setWBg("")}>Remove</button>}
+                    <button className="mini" onClick={() => {
+                      setBackgroundPickerTarget("new");
+                      setBackgroundPickerError("");
+                      setShowLauncherBackgrounds(false);
+                      setBackgroundPickerOpen(true);
+                    }}>Choose background...</button>
                   </div>
                   <p className="hint">Minecraft {wMc} · {cap(wLoader)}</p>
                   {createErr && <div className="err">{createErr}</div>}
@@ -1192,7 +1318,7 @@ function AppInner() {
                     <InstIcon inst={{ loader: wLoader, icon: wIcon }} size={64} />
                     <h3>Downloading {wName}...</h3>
                     <p className="hint">{status}</p>
-                    <div className="pbar"><span style={{ width: `${progress ? progress.pct : 5}%` }} /></div>
+                    <div className="pbar"><span style={{ "--progress-width": `${progress ? progress.pct : 5}%` } as CSSVars} /></div>
                     <p className="hint">{progress ? `${progress.label} ${progress.pct}%` : "Preparing..."}</p>
                   </div>
                 )}
@@ -1277,7 +1403,33 @@ function AppInner() {
               </header>
               <div className="settings-list">
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">▧</span><div><h3>Memory</h3><p>Choose how much RAM Minecraft can use.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="theme" /></span><div><h3>Appearance</h3><p>Choose a launcher style. Your choice is saved with your settings.</p></div></div>
+                  <label htmlFor="launcher-theme">Theme</label>
+                  <select id="launcher-theme" value={st.theme} disabled={!themesReady} onChange={(e) => {
+                    if (themeCatalog.some((theme) => theme.id === e.target.value))
+                      set("theme", e.target.value);
+                  }}>
+                    {themeCatalog.map((theme) => (
+                      <option key={theme.id} value={theme.id}>{theme.name} — {theme.author}</option>
+                    ))}
+                  </select>
+                  <p className="setting-note">
+                    Add CSS themes to <code>launcher/themes</code>. Theme files may include <code>Name</code> and <code>Author</code> comments; external imports and URLs are blocked.
+                  </p>
+                  <button className="mini" onClick={() => {
+                    invoke<ThemeCatalog>("list_themes")
+                      .then((catalog) => {
+                        setThemeCatalog(catalog.themes);
+                        setThemeWarnings(catalog.warnings);
+                        setThemeError("");
+                      })
+                      .catch((e) => setThemeError(`Could not reload themes: ${e}`));
+                  }}>Reload themes</button>
+                  {themeWarnings.map((warning) => <p key={warning} className="setting-note">{warning}</p>)}
+                  {themeError && <p className="setting-note">{themeError}</p>}
+                </section>
+                <section className="setting-card">
+                  <div className="setting-title"><span className="setting-icon"><Icon n="memory" /></span><div><h3>Memory</h3><p>Choose how much RAM Minecraft can use.</p></div></div>
                   <label className="check">
                     <input type="checkbox" checked={st.ramAuto} onChange={(e) => set("ramAuto", e.target.checked)} />
                     Auto ({(autoRam(sysRam, inst?.loader ?? "vanilla") / 1024).toFixed(1)} GB{sysRam ? ` of ${(sysRam / 1024).toFixed(0)} GB` : ""})
@@ -1288,7 +1440,7 @@ function AppInner() {
                 </section>
 
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">⌘</span><div><h3>Game</h3><p>Runtime, launch arguments, and in-game options.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="game" /></span><div><h3>Game</h3><p>Runtime, launch arguments, and in-game options.</p></div></div>
                   <label>Java runtime</label>
                   <select value={st.javaRuntime} onChange={(e) => {
                     set("javaRuntime", e.target.value as Settings["javaRuntime"]);
@@ -1329,7 +1481,7 @@ function AppInner() {
                 </section>
 
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">◈</span><div><h3>Launcher</h3><p>Set the launch experience and interface scale.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Launcher</h3><p>Set the launch experience and interface scale.</p></div></div>
                   <label>When the game starts</label>
                   <select value={st.hide} onChange={(e) => set("hide", e.target.value as Settings["hide"])}>
                     <option value="keep">Keep the launcher open</option>
@@ -1337,11 +1489,11 @@ function AppInner() {
                     <option value="close">Close the launcher</option>
                   </select>
                   <label>Interface size <span className="field-value">{st.uiScale}%</span></label>
-                  <input type="range" min={80} max={140} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
+                  <input type="range" min={80} max={200} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
                 </section>
 
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">◷</span><div><h3>Version list</h3><p>Choose which Minecraft releases appear in the browser.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="version" /></span><div><h3>Version list</h3><p>Choose which Minecraft releases appear in the browser.</p></div></div>
                   <label className="check"><input type="checkbox" checked={st.showSnapshots} onChange={(e) => set("showSnapshots", e.target.checked)} /> Snapshots</label>
                   <label className="check"><input type="checkbox" checked={st.showExperimental} onChange={(e) => set("showExperimental", e.target.checked)} /> Experimental and special versions</label>
                   <label className="check"><input type="checkbox" checked={st.showBeta} onChange={(e) => set("showBeta", e.target.checked)} /> Old beta</label>
@@ -1349,19 +1501,19 @@ function AppInner() {
                 </section>
 
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">◎</span><div><h3>Microsoft account</h3><p>Required to authenticate Microsoft accounts.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="microsoft" /></span><div><h3>Microsoft account</h3><p>Required to authenticate Microsoft accounts.</p></div></div>
                   <label>Azure client ID</label>
                   <input value={msClientId} onChange={(e) => setMsClientId(e.target.value)} />
                 </section>
 
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">⬡</span><div><h3>CurseForge</h3><p>Optional key for browsing CurseForge content.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="curseforge" /></span><div><h3>CurseForge</h3><p>Optional key for browsing CurseForge content.</p></div></div>
                   <label>CurseForge API key <span className="field-note">Free at console.curseforge.com</span></label>
                   <input type="password" value={cfKey} onChange={(e) => setCfKey(e.target.value)} />
                 </section>
 
                 <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon">▦</span><div><h3>Instances</h3><p>Manage instance storage and installation activity.</p></div></div>
+                  <div className="setting-title"><span className="setting-icon"><Icon n="instances" /></span><div><h3>Instances</h3><p>Manage instance storage and installation activity.</p></div></div>
                   <label>Instance folder</label>
                   <div className="folder-picker-row">
                     <span className="folder-picker-path" title={displayPath(instanceDirectoryDraft) || "No folder selected"}>
@@ -1392,7 +1544,7 @@ function AppInner() {
           )}
           </div>
 
-          <div className={"pagewrap " + (fade === "out" ? "out" : "in")} style={page === "mods" ? undefined : { display: "none" }}>
+          <div className={"pagewrap " + (fade === "out" ? "out" : "in") + (page === "mods" ? "" : " hidden")}>
             <ModsPage
               inst={inst}
               cfKey={cfKey}
@@ -1417,6 +1569,56 @@ function AppInner() {
       {contentInst && (
         <Modal title={`Installed content — ${contentInst.name}`} wide onClose={() => setContentInst(null)}>
           <ContentPage inst={contentInst} />
+        </Modal>
+      )}
+
+      {backgroundPickerOpen && (
+        <Modal title="Choose instance background" wide compact overlayClassName="background-picker-overlay" onClose={() => {
+          setBackgroundPickerOpen(false);
+          setShowLauncherBackgrounds(false);
+        }}>
+          {showLauncherBackgrounds ? (
+            <>
+              <div className="background-picker-subhead">
+                <button className="mini" onClick={() => { setShowLauncherBackgrounds(false); setBackgroundPickerError(""); }}>← Back</button>
+                <p>Choose a background from Arca Launcher.</p>
+              </div>
+              <div className="background-gallery">
+                {LAUNCHER_BACKGROUNDS.map((background) => (
+                  <button key={background.name} className="background-choice" onClick={() => { void chooseLauncherBackground(background.src); }}>
+                    <img src={background.src} alt="" />
+                    <span>{background.name}</span>
+                  </button>
+                ))}
+              </div>
+              {backgroundPickerError && <div className="err">{backgroundPickerError}</div>}
+            </>
+          ) : (
+            <>
+              <p className="hint background-picker-hint">Choose how you want to set this instance's background.</p>
+              <div className="background-source-list">
+                <button className="background-source" onClick={() => {
+                  if (backgroundPickerTarget === "new") setWBg("");
+                  else setEditBg("");
+                  setBackgroundPickerOpen(false);
+                }}>
+                  <span className="background-source-preview none">Aa</span>
+                  <span><b>None</b><small>Use the launcher's default background.</small></span>
+                </button>
+                <button className="background-source" onClick={() => { setShowLauncherBackgrounds(true); setBackgroundPickerError(""); }}>
+                  <span className="background-source-preview"><img src={LAUNCHER_BACKGROUNDS[0].src} alt="" /></span>
+                  <span><b>Library</b><small>Choose from built-in backgrounds.</small></span>
+                </button>
+                <button className="background-source" onClick={() => {
+                  setBackgroundPickerOpen(false);
+                  pickFile(backgroundPickerTarget === "new" ? "bg-new" : "bg-edit");
+                }}>
+                  <span className="background-source-preview upload">＋</span>
+                  <span><b>Custom </b><small>Choose a PNG, JPEG, or GIF from your device.</small></span>
+                </button>
+              </div>
+            </>
+          )}
         </Modal>
       )}
 
@@ -1483,7 +1685,12 @@ function AppInner() {
                     ? <BgPreview className="bgpreview editbgpreview" src={editBg} />
                     : <div className="bgpreview ph editbgpreview"><span>No background selected</span></div>}
                   <div className="editassetactions">
-                    <button className="mini" type="button" onClick={() => pickFile("bg-edit")}>Choose file...</button>
+                    <button className="mini" type="button" onClick={() => {
+                      setBackgroundPickerTarget("edit");
+                      setBackgroundPickerError("");
+                      setShowLauncherBackgrounds(false);
+                      setBackgroundPickerOpen(true);
+                    }}>Choose background...</button>
                     {editBg && <button className="mini" type="button" onClick={() => setEditBg("")}>Remove</button>}
                   </div>
                 </div>

@@ -1,9 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type Inst = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string };
+type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 
 /** One file written into the mods folder: which project it came from, what version/channel it
  *  was, and whether it was the thing the person clicked Install on or a pulled-in dependency. */
@@ -271,14 +272,14 @@ export function DownloadOverlay() {
             <div className={"dlfitem" + (t.fading ? " fading" : "")} key={t.key}>
               {t.icon
                 ? <img src={t.icon} width={30} height={30} className="micon" alt=""
-                    onError={(e) => (e.currentTarget.style.visibility = "hidden")} />
+                    onError={(e) => e.currentTarget.classList.add("is-hidden")} />
                 : <span className="dlfph" />}
               <div className="dlfinfo">
                 <b>{t.title}</b>
                 <span className={"dlfstatus " + t.phase}>{t.detail}</span>
                 {t.phase === "running" && (
                   <div className={"pbar slim" + (t.pct == null ? " indeterminate" : "")}>
-                    <span style={t.pct != null ? { width: `${t.pct}%` } : undefined} />
+                    <span style={t.pct != null ? { "--progress-width": `${t.pct}%` } as CSSVars : undefined} />
                   </div>
                 )}
               </div>

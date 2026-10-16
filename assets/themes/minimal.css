@@ -1,0 +1,327 @@
+/*
+Name: Minimal
+Author: Arca Launcher
+*/
+
+:root[data-theme="builtin:minimal"] {
+  --bg: #000;
+  --panel: #050505;
+  --panel2: #0c0c0c;
+  --line: rgba(255,255,255,.1);
+  --purple: #d4d4d4;
+  --green: #f5f5f5;
+  --text: #f5f5f5;
+  --mute: #999;
+}
+:root[data-theme="builtin:minimal"] body {
+  background: #000;
+}
+:root[data-theme="builtin:minimal"] ::-webkit-scrollbar-thumb {
+  background: #333;
+}
+:root[data-theme="builtin:minimal"] .body {
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+:root[data-theme="builtin:minimal"] .content {
+  order: 0;
+  min-height: 0;
+  min-width: 0;
+}
+:root[data-theme="builtin:minimal"] .side {
+  order: 1;
+  width: 100%;
+  min-height: 62px;
+  flex: 0 0 62px;
+  flex-direction: row;
+  justify-content: space-around;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 16px;
+}
+:root[data-theme="builtin:minimal"] .side > .grow {
+  display: none;
+}
+:root[data-theme="builtin:minimal"] .side > .nav {
+  width: auto;
+  height: 48px;
+  min-width: 0;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 2px;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--mute);
+  box-shadow: none;
+}
+:root[data-theme="builtin:minimal"] .side > .nav::after {
+  content: attr(title);
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root[data-theme="builtin:minimal"] .side > .nav .ui-icon {
+  width: 17px;
+  height: 17px;
+}
+:root[data-theme="builtin:minimal"] .side > .nav:hover:not(.on) {
+  background: #111;
+  color: #fff;
+}
+:root[data-theme="builtin:minimal"] .nav.on,
+:root[data-theme="builtin:minimal"] .launch {
+  background: #f5f5f5;
+  color: #000;
+  box-shadow: none;
+}
+:root[data-theme="builtin:minimal"] .side > .nav.on {
+  background: #1a1a1a;
+  color: #fff;
+}
+:root[data-theme="builtin:minimal"] .side > .nav.on .ui-icon {
+  filter: brightness(0) invert(1);
+}
+:root[data-theme="builtin:minimal"] .hero {
+  background:
+    linear-gradient(90deg, rgba(0,0,0,.96), rgba(0,0,0,.72)),
+    repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 24px, transparent 24px 48px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.018) 0 24px, transparent 24px 48px),
+    #000;
+}
+:root[data-theme="builtin:minimal"] .tag,
+:root[data-theme="builtin:minimal"] .code {
+  background: #151515;
+  color: #eee;
+}
+:root[data-theme="builtin:minimal"] .ntag {
+  background: #ddd;
+  color: #000;
+}
+:root[data-theme="builtin:minimal"] .bar {
+  background: #000;
+}
+:root[data-theme="builtin:minimal"] .card {
+  background: linear-gradient(160deg, #0c0c0c, #050505 70%);
+}
+:root[data-theme="builtin:minimal"] .logo,
+:root[data-theme="builtin:minimal"] .log,
+:root[data-theme="builtin:minimal"] .console-page .log,
+:root[data-theme="builtin:minimal"] .filelist {
+  background: #000;
+}
+:root[data-theme="builtin:minimal"] .pill {
+  background: #111;
+  border-color: var(--line);
+}
+:root[data-theme="builtin:minimal"] .instpick {
+  background: #111;
+  border-color: var(--line);
+}
+:root[data-theme="builtin:minimal"] .instpick:hover {
+  background: #1a1a1a;
+}
+:root[data-theme="builtin:minimal"] .menu {
+  border-color: var(--line);
+  background: #050505;
+  box-shadow: 0 16px 40px rgba(0,0,0,.8);
+}
+:root[data-theme="builtin:minimal"] .menu .mitem:hover,
+:root[data-theme="builtin:minimal"] .menu .mitem.on {
+  background: #1a1a1a;
+  color: #f5f5f5;
+}
+:root[data-theme="builtin:minimal"] .menu .mitem.add {
+  color: #f5f5f5;
+}
+:root[data-theme="builtin:minimal"] .verpicker,
+:root[data-theme="builtin:minimal"] .crashdialog,
+:root[data-theme="builtin:minimal"] .editdialog {
+  border-color: var(--line);
+  background: #050505;
+}
+:root[data-theme="builtin:minimal"] .chpill.release,
+:root[data-theme="builtin:minimal"] .chpill.beta,
+:root[data-theme="builtin:minimal"] .chpill.alpha {
+  background: #151515;
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .chdot.release,
+:root[data-theme="builtin:minimal"] .chdot.beta,
+:root[data-theme="builtin:minimal"] .chdot.alpha {
+  background: #bbb;
+}
+:root[data-theme="builtin:minimal"] .vprow.release .vprowch,
+:root[data-theme="builtin:minimal"] .vprow.beta .vprowch,
+:root[data-theme="builtin:minimal"] .vprow.alpha .vprowch,
+:root[data-theme="builtin:minimal"] .vprowcheck {
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .mini,
+:root[data-theme="builtin:minimal"] .mitem:hover,
+:root[data-theme="builtin:minimal"] .mitem.on,
+:root[data-theme="builtin:minimal"] .stp.on {
+  background: #1a1a1a;
+  color: #f5f5f5;
+}
+:root[data-theme="builtin:minimal"] .version-pagination .mini {
+  background: #1a1a1a;
+  color: #f5f5f5;
+}
+:root[data-theme="builtin:minimal"] .version-pagination .mini:disabled {
+  background: #0b0b0b;
+  color: #666;
+}
+:root[data-theme="builtin:minimal"] .btn.purple,
+:root[data-theme="builtin:minimal"] .seg button.on,
+:root[data-theme="builtin:minimal"] .ver.on,
+:root[data-theme="builtin:minimal"] .badge,
+:root[data-theme="builtin:minimal"] .badgebtn,
+:root[data-theme="builtin:minimal"] .mods-sources button.on,
+:root[data-theme="builtin:minimal"] .mods-types button.on {
+  background: #e5e5e5;
+  color: #000;
+  box-shadow: none;
+}
+:root[data-theme="builtin:minimal"] .badgebtn:hover {
+  background: #f5f5f5;
+  color: #000;
+}
+:root[data-theme="builtin:minimal"] .acc.on {
+  background: #101010;
+  border-color: #aaa;
+  box-shadow: 0 0 0 1px #aaa inset;
+}
+:root[data-theme="builtin:minimal"] .account-notice {
+  border-color: var(--line);
+  background: #0b0b0b;
+}
+:root[data-theme="builtin:minimal"] .empty-avatar,
+:root[data-theme="builtin:minimal"] .empty-cube {
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .stp.done {
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .lcard:hover:not(:disabled),
+:root[data-theme="builtin:minimal"] .lcard.on {
+  border-color: #aaa;
+}
+:root[data-theme="builtin:minimal"] .icard {
+  background: linear-gradient(145deg, #111, transparent 52%), var(--panel2);
+}
+:root[data-theme="builtin:minimal"] .icard:hover,
+:root[data-theme="builtin:minimal"] .icard.on {
+  border-color: #aaa;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset;
+}
+:root[data-theme="builtin:minimal"] .icard-art {
+  background: radial-gradient(ellipse at 50% 115%, rgba(255,255,255,.06), transparent 70%), #050505;
+}
+:root[data-theme="builtin:minimal"] .icard-top > .badge {
+  background: #e5e5e5;
+  color: #000;
+}
+:root[data-theme="builtin:minimal"] .icard-actions .select-instance {
+  background: #1a1a1a;
+  color: #f5f5f5;
+}
+:root[data-theme="builtin:minimal"] .console-empty > span {
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .console-indicator.active {
+  background: #ddd;
+  box-shadow: 0 0 9px rgba(255,255,255,.5);
+}
+:root[data-theme="builtin:minimal"] .setting-icon {
+  border-color: var(--line);
+  background: #111;
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .setting-card > label:not(.check),
+:root[data-theme="builtin:minimal"] .onboarding-login-fields label,
+:root[data-theme="builtin:minimal"] .onboarding-instance > label {
+  color: var(--mute);
+}
+:root[data-theme="builtin:minimal"] .onboarding-overlay {
+  background: #000;
+}
+:root[data-theme="builtin:minimal"] .onboarding-card,
+:root[data-theme="builtin:minimal"] .onboarding-account-type,
+:root[data-theme="builtin:minimal"] .onboarding-loader {
+  background: #050505;
+}
+:root[data-theme="builtin:minimal"] .onboarding-logo,
+:root[data-theme="builtin:minimal"] .onboarding-art,
+:root[data-theme="builtin:minimal"] .onboarding-progress-step > span {
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .onboarding-progress-step.complete,
+:root[data-theme="builtin:minimal"] .onboarding-account-type > span {
+  color: #ddd;
+}
+:root[data-theme="builtin:minimal"] .onboarding-progress-step.active > span,
+:root[data-theme="builtin:minimal"] .onboarding-progress-step.complete > span,
+:root[data-theme="builtin:minimal"] .onboarding-account-type.active,
+:root[data-theme="builtin:minimal"] .onboarding-loader.active {
+  border-color: #aaa;
+  background: #161616;
+  color: #f5f5f5;
+}
+:root[data-theme="builtin:minimal"] .onboarding-account-type:hover,
+:root[data-theme="builtin:minimal"] .onboarding-loader:hover:not(:disabled) {
+  border-color: #777;
+}
+:root[data-theme="builtin:minimal"] .onboarding-success {
+  border-color: var(--line);
+  background: #101010;
+}
+:root[data-theme="builtin:minimal"] .app-modal-card {
+  border-color: var(--line);
+  background: #050505;
+}
+:root[data-theme="builtin:minimal"] .app-modal-card .mini {
+  background: #1a1a1a;
+}
+:root[data-theme="builtin:minimal"] .pbar span {
+  background: linear-gradient(90deg, #f5f5f5, #aaa);
+  box-shadow: 0 0 8px rgba(255,255,255,.25);
+}
+:root[data-theme="builtin:minimal"] .mods-eyebrow,
+:root[data-theme="builtin:minimal"] .eyebrow,
+:root[data-theme="builtin:minimal"] .field-value,
+:root[data-theme="builtin:minimal"] .mods-panel .mcardfoot > .mini {
+  color: #ccc;
+}
+:root[data-theme="builtin:minimal"] .mods-panel .mcardfoot > .mini {
+  background: #111;
+  border-color: var(--line);
+}
+:root[data-theme="builtin:minimal"] .mods-panel .mcardfoot > .mini:hover,
+:root[data-theme="builtin:minimal"] .app-modal-card .mini:hover {
+  background: #e5e5e5;
+  color: #000;
+}
+:root[data-theme="builtin:minimal"] .vprow.on {
+  background: #151515;
+  border-color: #aaa;
+}
+:root[data-theme="builtin:minimal"] .ver.snapshot,
+:root[data-theme="builtin:minimal"] .ver.old_beta,
+:root[data-theme="builtin:minimal"] .ver.old_alpha {
+  color: #bdbdbd;
+}
+:root[data-theme="builtin:minimal"] .editinput:focus,
+:root[data-theme="builtin:minimal"] .edittextarea:focus,
+:root[data-theme="builtin:minimal"] .mods-searchwrap:focus-within {
+  border-color: #aaa;
+  box-shadow: 0 0 0 2px rgba(255,255,255,.1);
+}
+:root[data-theme="builtin:minimal"] .mcard:hover { transform: none; }

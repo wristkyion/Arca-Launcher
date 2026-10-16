@@ -23,6 +23,293 @@ pub fn emit(app: &AppHandle, msg: impl Into<String>) {
     let _ = app.emit("progress", msg.into());
 }
 
+const MAX_THEME_SIZE: u64 = 256 * 1024;
+
+#[derive(Serialize)]
+struct ThemeInfo {
+    id: String,
+    name: String,
+    author: String,
+    builtin: bool,
+}
+
+#[derive(Serialize)]
+struct ThemeCatalog {
+    themes: Vec<ThemeInfo>,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ThemeStylesheet {
+    id: String,
+    name: String,
+    author: String,
+    css: String,
+}
+
+fn builtin_theme(id: &str) -> Option<ThemeStylesheet> {
+    let (name, css) = match id {
+        "builtin:default" => ("Default", include_str!("../../assets/themes/default.css")),
+        "builtin:minimal" => ("Minimal", include_str!("../../assets/themes/minimal.css")),
+        "builtin:minecraft" => (
+            "Minecraft style",
+            include_str!("../../assets/themes/minecraft.css"),
+        ),
+        _ => return None,
+    };
+    Some(ThemeStylesheet {
+        id: id.to_string(),
+        name: name.to_string(),
+        author: "Arca Launcher".to_string(),
+        css: css.to_string(),
+    })
+}
+
+fn theme_metadata(css: &str, fallback_name: &str) -> (String, String) {
+    let mut name = None;
+    let mut author = None;
+    let mut in_comment = false;
+    for line in css.lines() {
+        let mut text = line.trim();
+        if !in_comment {
+            if let Some(start) = text.find("/*") {
+                text = &text[start + 2..];
+                in_comment = true;
+            } else {
+                continue;
+            }
+        }
+        if let Some(end) = text.find("*/") {
+            text = &text[..end];
+            in_comment = false;
+        }
+        let text = text.trim().trim_start_matches('*').trim();
+        if let Some((key, value)) = text.split_once(':') {
+            let value = value.trim();
+            if !value.is_empty() {
+                match key.trim().to_ascii_lowercase().as_str() {
+                    "name" => name = Some(value.to_string()),
+                    "author" => author = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    (
+        name.unwrap_or_else(|| fallback_name.to_string()),
+        author.unwrap_or_else(|| "Unknown".to_string()),
+    )
+}
+
+fn strip_css_comments(css: &str) -> String {
+    let mut output = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some(character) = chars.next() {
+        if let Some(delimiter) = quote {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+        } else if character == '"' || character == '\'' {
+            quote = Some(character);
+            output.push(character);
+        } else if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(character) = chars.next() {
+                if character == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn validate_theme_css(css: &str) -> Result<(), String> {
+    if css.len() as u64 > MAX_THEME_SIZE {
+        return Err("Theme CSS is larger than 256 KB".to_string());
+    }
+    let css = strip_css_comments(css);
+    if css.contains('\\') {
+        return Err("CSS escape sequences are not supported in custom themes".to_string());
+    }
+    let lower = css.to_ascii_lowercase();
+    for blocked in [
+        "@import",
+        "url(",
+        "image-set(",
+        "-webkit-image-set(",
+        "expression(",
+        "javascript:",
+        "behavior:",
+        "-moz-binding",
+    ] {
+        if lower.contains(blocked) {
+            return Err(format!("Theme CSS may not contain {blocked}"));
+        }
+    }
+    Ok(())
+}
+
+fn custom_themes_dir() -> Result<PathBuf, String> {
+    let (_, launcher, _) = setup_dirs();
+    let themes = launcher.join("themes");
+    std::fs::create_dir_all(&themes)
+        .map_err(|error| format!("Could not create themes folder: {error}"))?;
+    Ok(themes)
+}
+
+fn custom_theme_path(id: &str) -> Result<PathBuf, String> {
+    let stem = id
+        .strip_prefix("custom:")
+        .filter(|stem| !stem.is_empty() && !stem.contains('/') && !stem.contains('\\'))
+        .ok_or_else(|| "Invalid custom theme id".to_string())?;
+    let themes_dir = custom_themes_dir()?;
+    let canonical_dir = themes_dir
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve themes folder: {error}"))?;
+    let path = themes_dir.join(format!("{stem}.css"));
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("Could not find custom theme: {error}"))?;
+    if canonical_path.parent() != Some(canonical_dir.as_path()) {
+        return Err("Custom theme must be a CSS file inside the themes folder".to_string());
+    }
+    Ok(canonical_path)
+}
+
+#[tauri::command]
+fn list_themes() -> Result<ThemeCatalog, String> {
+    let mut themes = [
+        ("builtin:default", "Default"),
+        ("builtin:minimal", "Minimal"),
+        ("builtin:minecraft", "Minecraft style"),
+    ]
+    .into_iter()
+    .map(|(id, name)| ThemeInfo {
+        id: id.to_string(),
+        name: name.to_string(),
+        author: "Arca Launcher".to_string(),
+        builtin: true,
+    })
+    .collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    let themes_dir = custom_themes_dir()?;
+    let canonical_themes_dir = themes_dir
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve themes folder: {error}"))?;
+    let entries = std::fs::read_dir(&themes_dir)
+        .map_err(|error| format!("Could not list themes folder: {error}"))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!("Could not read a theme folder entry: {error}"));
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !path.is_file()
+            || !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("css"))
+        {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|name| name.to_str()) {
+            Some(stem) if !stem.is_empty() => stem.to_string(),
+            _ => {
+                warnings.push(format!(
+                    "Skipped a theme with an invalid filename: {}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let canonical_path = match path.canonicalize() {
+            Ok(path) if path.parent() == Some(canonical_themes_dir.as_path()) => path,
+            Ok(_) => {
+                warnings.push(format!(
+                    "{stem}.css points outside the themes folder and was skipped"
+                ));
+                continue;
+            }
+            Err(error) => {
+                warnings.push(format!("Could not resolve {stem}.css: {error}"));
+                continue;
+            }
+        };
+        let size = match canonical_path.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                warnings.push(format!("Could not read {stem}.css metadata: {error}"));
+                continue;
+            }
+        };
+        if size > MAX_THEME_SIZE {
+            warnings.push(format!("{stem}.css is larger than 256 KB and was skipped"));
+            continue;
+        }
+        let css = match std::fs::read_to_string(&canonical_path) {
+            Ok(css) => css,
+            Err(error) => {
+                warnings.push(format!("Could not read {stem}.css: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = validate_theme_css(&css) {
+            warnings.push(format!("{stem}.css was skipped: {error}"));
+            continue;
+        }
+        let (name, author) = theme_metadata(&css, &stem);
+        themes.push(ThemeInfo {
+            id: format!("custom:{stem}"),
+            name,
+            author,
+            builtin: false,
+        });
+    }
+    themes.sort_by(|a, b| {
+        a.builtin
+            .cmp(&b.builtin)
+            .reverse()
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(ThemeCatalog { themes, warnings })
+}
+
+#[tauri::command]
+fn load_theme(id: String) -> Result<ThemeStylesheet, String> {
+    if let Some(theme) = builtin_theme(&id) {
+        return Ok(theme);
+    }
+    let path = custom_theme_path(&id)?;
+    let css = std::fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read custom theme: {error}"))?;
+    validate_theme_css(&css)?;
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Custom theme filename is invalid".to_string())?;
+    let (name, author) = theme_metadata(&css, stem);
+    Ok(ThemeStylesheet {
+        id,
+        name,
+        author,
+        css,
+    })
+}
+
 fn root_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -1069,9 +1356,47 @@ fn main() {
             open_instance_folder,
             load_settings,
             save_settings,
+            list_themes,
+            load_theme,
             set_instance_directory,
             download_java_runtime
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::{builtin_theme, theme_metadata, validate_theme_css};
+
+    #[test]
+    fn reads_custom_theme_name_and_author() {
+        assert_eq!(
+            theme_metadata("/*\nName: Forest\nAuthor: Example\n*/\n:root {}", "forest"),
+            ("Forest".to_string(), "Example".to_string())
+        );
+    }
+
+    #[test]
+    fn allows_local_css_theme_rules() {
+        assert!(validate_theme_css(":root { --bg: #101116; }").is_ok());
+    }
+
+    #[test]
+    fn builtin_themes_pass_custom_css_safety_checks() {
+        for id in ["builtin:default", "builtin:minimal", "builtin:minecraft"] {
+            let theme = builtin_theme(id).expect("theme should be embedded");
+            assert!(
+                validate_theme_css(&theme.css).is_ok(),
+                "{} should pass CSS validation",
+                theme.name
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_external_css_resources_even_when_comments_split_the_token() {
+        assert!(validate_theme_css("a { background: u/**/rl(https://example.com/x); }").is_err());
+        assert!(validate_theme_css("@im/**/port 'https://example.com/theme.css';").is_err());
+    }
 }

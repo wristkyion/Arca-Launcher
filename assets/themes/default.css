@@ -1,0 +1,18 @@
+/*
+Name: Default
+Author: Arca Launcher
+*/
+
+:root[data-theme="builtin:default"] {
+  --bg: #0a0910;
+  --panel: #13111b;
+  --panel2: #1a1724;
+  --line: rgba(255,255,255,.07);
+  --purple: #7c3aed;
+  --green: #6cc51f;
+  --text: #ecebf2;
+  --mute: #8d8a9c;
+}
+:root[data-theme="builtin:default"] body {
+  background: radial-gradient(1200px 600px at 20% -10%, #2a1456 0%, transparent 60%), var(--bg);
+}
