@@ -8,25 +8,29 @@ Arca-Launcher is an indie project focused on creating a personalized and user-fr
 
 This project is still in early development, so some features may be incomplete, change over time, or contain bugs.
 
- <table>
+<table>
   <tr>
-    <td width="33%">
-      <img src="screenshot/1.png" width="100%" alt="Arca Launcher screenshot 1">
+    <td width="50%" align="center">
+      <a href="screenshot/1.png"><img src="screenshot/1.png" width="100%" alt="Arca Launcher screenshot 1"></a>
     </td>
-    <td width="33%">
-      <img src="screenshot/2.png" width="100%" alt="Arca Launcher screenshot 2">
+    <td width="50%" align="center">
+      <a href="screenshot/2.png"><img src="screenshot/2.png" width="100%" alt="Arca Launcher screenshot 2"></a>
     </td>
-    <td width="33%">
-      <img src="screenshot/3.png" width="100%" alt="Arca Launcher screenshot 3">
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="screenshot/3.png"><img src="screenshot/3.png" width="100%" alt="Arca Launcher screenshot 3"></a>
     </td>
-    <td width="33%">
-      <img src="screenshot/4.png" width="100%" alt="Arca Launcher screenshot 4">
+    <td width="50%" align="center">
+      <a href="screenshot/4.png"><img src="screenshot/4.png" width="100%" alt="Arca Launcher screenshot 4"></a>
     </td>
-    <td width="33%">
-      <img src="screenshot/5.png" width="100%" alt="Arca Launcher screenshot 5">
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="screenshot/5.png"><img src="screenshot/5.png" width="100%" alt="Arca Launcher screenshot 5"></a>
     </td>
-    <td width="33%">
-      <img src="screenshot/6.png" width="100%" alt="Arca Launcher screenshot 6">
+    <td width="50%" align="center">
+      <a href="screenshot/6.png"><img src="screenshot/6.png" width="100%" alt="Arca Launcher screenshot 6"></a>
     </td>
   </tr>
 </table>
