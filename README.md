@@ -19,6 +19,15 @@ This project is still in early development, so some features may be incomplete, 
     <td width="33%">
       <img src="screenshot/3.png" width="100%" alt="Arca Launcher screenshot 3">
     </td>
+    <td width="33%">
+      <img src="screenshot/4.png" width="100%" alt="Arca Launcher screenshot 4">
+    </td>
+    <td width="33%">
+      <img src="screenshot/5.png" width="100%" alt="Arca Launcher screenshot 5">
+    </td>
+    <td width="33%">
+      <img src="screenshot/6.png" width="100%" alt="Arca Launcher screenshot 6">
+    </td>
   </tr>
 </table>
 
