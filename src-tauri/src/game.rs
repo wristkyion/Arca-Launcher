@@ -13,7 +13,7 @@ use std::sync::{
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -234,9 +234,8 @@ pub async fn install_loader(
                 .as_str()
                 .or(promos["promos"][&lat].as_str())
                 .ok_or_else(|| anyhow!("No Forge build for Minecraft {mc}"))?;
-            let ver = format!("{mc}-{fv}");
-            let url = format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{ver}/forge-{ver}-installer.jar");
-            run_installer(app, c, dir, &url, java, &format!("{mc}-forge-{fv}")).await
+            let urls = forge_installer_urls(mc, fv);
+            run_installer(app, c, dir, &urls, java, &format!("{mc}-forge-{fv}")).await
         }
 
         "neoforge" => {
@@ -264,11 +263,24 @@ pub async fn install_loader(
                 .or(matching.last())
                 .ok_or_else(|| anyhow!("No NeoForge build for Minecraft {mc}"))?;
             let url = format!("https://maven.neoforged.net/releases/net/neoforged/neoforge/{nv}/neoforge-{nv}-installer.jar");
-            run_installer(app, c, dir, &url, java, &format!("neoforge-{nv}")).await
+            run_installer(app, c, dir, &[url], java, &format!("neoforge-{nv}")).await
         }
 
         other => Err(anyhow!("Unknown loader {other}")),
     }
+}
+
+fn forge_installer_urls(mc: &str, version: &str) -> [String; 2] {
+    let ver = format!("{mc}-{version}");
+    let legacy_ver = format!("{ver}-{mc}");
+    [
+        format!(
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/{ver}/forge-{ver}-installer.jar"
+        ),
+        format!(
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/{legacy_ver}/forge-{legacy_ver}-installer.jar"
+        ),
+    ]
 }
 
 fn version_dirs(dir: &Path) -> HashSet<String> {
@@ -285,7 +297,7 @@ async fn run_installer(
     app: &AppHandle,
     c: &reqwest::Client,
     dir: &Path,
-    url: &str,
+    urls: &[String],
     java: &str,
     expected: &str,
 ) -> Result<String> {
@@ -298,14 +310,33 @@ async fn run_installer(
     if exists(expected) {
         return Ok(expected.to_string());
     }
-    let jar = dir
+    emit(app, "Downloading loader installer");
+    let installer_dir = dir
         .parent()
         .unwrap_or(dir)
         .join("launcher")
-        .join("installers")
-        .join(url.rsplit('/').next().unwrap_or("installer.jar"));
-    emit(app, "Downloading loader installer");
-    download(c, url, &jar).await?;
+        .join("installers");
+    let mut jar = None;
+    let mut errors = Vec::new();
+    for url in urls {
+        let candidate = installer_dir.join(url.rsplit('/').next().unwrap_or("installer.jar"));
+        match download(c, url, &candidate).await {
+            Ok(()) => {
+                jar = Some(candidate);
+                break;
+            }
+            Err(error) => errors.push(format!("{url}: {error:#}")),
+        }
+    }
+    let jar = jar.ok_or_else(|| {
+        anyhow!(
+            "Could not download loader installer from any known URL:\n{}",
+            errors.join("\n")
+        )
+    })?;
+    if let Some(id) = install_legacy_client_profile(&jar, dir)? {
+        return Ok(id);
+    }
 
     let lp = dir.join("launcher_profiles.json"); // older installers require this file
     if !lp.exists() {
@@ -344,6 +375,74 @@ async fn run_installer(
         .next()
         .cloned()
         .ok_or_else(|| anyhow!("Installer finished but no new version was found"))
+}
+
+fn legacy_client_version(profile: &Value) -> Result<Option<(String, Value)>> {
+    if profile["processors"]
+        .as_array()
+        .is_some_and(|processors| !processors.is_empty())
+    {
+        return Ok(None);
+    }
+    let Some(mut version) = profile
+        .get("versionInfo")
+        .filter(|v| v.is_object())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let id = version["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Legacy installer profile is missing versionInfo.id"))?
+        .to_string();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        anyhow::bail!("Legacy installer profile has an invalid version id");
+    }
+
+    let install_path = profile["install"]["path"].as_str();
+    let universal_jar = profile["install"]["filePath"]
+        .as_str()
+        .is_some_and(|file| file.ends_with("-universal.jar"));
+    if universal_jar {
+        if let (Some(path), Some(libraries)) = (install_path, version["libraries"].as_array_mut()) {
+            if let Some(library) = libraries
+                .iter_mut()
+                .find(|library| library["name"].as_str() == Some(path))
+            {
+                library["name"] = format!("{path}:universal").into();
+            }
+        }
+    }
+
+    Ok(Some((id, version)))
+}
+
+fn install_legacy_client_profile(installer: &Path, dir: &Path) -> Result<Option<String>> {
+    let mut archive = zip::ZipArchive::new(fs::File::open(installer)?)?;
+    let profile = {
+        let mut entry = match archive.by_name("install_profile.json") {
+            Ok(entry) => entry,
+            Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut contents = String::new();
+        entry.read_to_string(&mut contents)?;
+        serde_json::from_str::<Value>(&contents)?
+    };
+    let Some((id, version)) = legacy_client_version(&profile)? else {
+        return Ok(None);
+    };
+    let version_dir = dir.join("versions").join(&id);
+    fs::create_dir_all(&version_dir)?;
+    fs::write(
+        version_dir.join(format!("{id}.json")),
+        serde_json::to_vec(&version)?,
+    )?;
+    Ok(Some(id))
 }
 
 // ---------------------------------------------------------------- version json
@@ -682,6 +781,92 @@ fn expand(a: &Value, vars: &HashMap<&str, String>) -> Vec<String> {
     }
 }
 
+fn expand_jvm_arg(a: &Value, vars: &HashMap<&str, String>, id: &str, jar_id: &str) -> Vec<String> {
+    let profile_jar = format!("{id}.jar");
+    let client_jar = format!("{jar_id}.jar");
+    expand(a, vars)
+        .into_iter()
+        .map(|arg| {
+            if arg.starts_with("-DignoreList=") {
+                arg.replace(&profile_jar, &client_jar)
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod launch_argument_tests {
+    use super::{expand, expand_jvm_arg, forge_installer_urls, legacy_client_version, maven_path};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn neoforge_ignore_list_uses_the_inherited_client_jar() {
+        let vars = HashMap::from([("version_name", "neoforge-21.1.262".to_string())]);
+        let ignore_list = json!("-DignoreList=client-extra,${version_name}.jar");
+
+        assert_eq!(
+            expand_jvm_arg(&ignore_list, &vars, "neoforge-21.1.262", "1.21.1"),
+            ["-DignoreList=client-extra,1.21.1.jar"]
+        );
+        assert_eq!(expand(&json!("--version"), &vars), ["--version"]);
+        assert_eq!(
+            expand(&json!("${version_name}"), &vars),
+            ["neoforge-21.1.262"]
+        );
+    }
+
+    #[test]
+    fn forge_installer_urls_include_legacy_minecraft_coordinate() {
+        let urls = forge_installer_urls("1.7.10", "10.13.4.1614");
+        assert!(urls[0].ends_with("/1.7.10-10.13.4.1614/forge-1.7.10-10.13.4.1614-installer.jar"));
+        assert!(urls[1].ends_with(
+            "/1.7.10-10.13.4.1614-1.7.10/forge-1.7.10-10.13.4.1614-1.7.10-installer.jar"
+        ));
+    }
+
+    #[test]
+    fn legacy_forge_profile_installs_universal_library_without_client_flag() {
+        let profile = json!({
+            "install": {
+                "path": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                "filePath": "forge-1.7.10-10.13.4.1614-1.7.10-universal.jar"
+            },
+            "versionInfo": {
+                "id": "1.7.10-Forge10.13.4.1614-1.7.10",
+                "inheritsFrom": "1.7.10",
+                "libraries": [{
+                    "name": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                    "url": "https://maven.minecraftforge.net/"
+                }]
+            }
+        });
+
+        let (id, version) = legacy_client_version(&profile).unwrap().unwrap();
+        assert_eq!(id, "1.7.10-Forge10.13.4.1614-1.7.10");
+        let library = &version["libraries"][0]["name"];
+        assert_eq!(
+            library,
+            "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10:universal"
+        );
+        assert_eq!(
+            maven_path(library.as_str().unwrap()),
+            "net/minecraftforge/forge/1.7.10-10.13.4.1614-1.7.10/forge-1.7.10-10.13.4.1614-1.7.10-universal.jar"
+        );
+    }
+
+    #[test]
+    fn processor_based_installers_still_use_the_installer_cli() {
+        let profile = json!({
+            "processors": [{"jar": "example:processor:1.0"}],
+            "versionInfo": {"id": "forge-example"}
+        });
+        assert!(legacy_client_version(&profile).unwrap().is_none());
+    }
+}
+
 pub struct LaunchOpts {
     pub jvm_args: Vec<String>,
     pub game_args: Vec<String>,
@@ -793,7 +978,10 @@ pub fn launch(
     vars.insert("auth_xuid", "".into());
 
     let jvm: Vec<String> = match v["arguments"]["jvm"].as_array() {
-        Some(a) => a.iter().flat_map(|x| expand(x, &vars)).collect(),
+        Some(a) => a
+            .iter()
+            .flat_map(|x| expand_jvm_arg(x, &vars, id, &jid))
+            .collect(),
         None => vec![
             sub("-Djava.library.path=${natives_directory}", &vars),
             "-cp".into(),

@@ -90,7 +90,7 @@ Author: Arca Launcher
 }
 :root[data-theme="builtin:minecraft"] .side > .nav[title="Home"]::after { content: "Home"; }
 :root[data-theme="builtin:minecraft"] .side > .nav[title="Accounts"]::after { content: "Account"; }
-:root[data-theme="builtin:minecraft"] .side > .nav[title="Download"]::after { content: "Instance"; }
+:root[data-theme="builtin:minecraft"] .side > .nav[title="Instance"]::after { content: "Instance"; }
 :root[data-theme="builtin:minecraft"] .side > .nav[title="Downloader"]::after { content: "Downloader"; }
 :root[data-theme="builtin:minecraft"] .side > .nav[title="Console"]::after { content: "Console"; }
 :root[data-theme="builtin:minecraft"] .side > .nav[title="Settings"] {

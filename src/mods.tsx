@@ -12,11 +12,9 @@ type VersionHit = { id: string; name: string; channel: string; game_versions: st
 
 type Props = {
   inst: Inst | null;
-  cfKey: string;
   java: string;
   javaMode: "system" | "launcher";
   onPackInstalled: (list: Inst[]) => void;
-  goSettings: () => void;
   active: boolean;
 };
 
@@ -24,7 +22,7 @@ const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmt = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n));
 const chLabel = (ch: string) => (ch === "release" ? "Release" : ch === "beta" ? "Beta" : ch === "alpha" ? "Alpha" : cap(ch));
 
-export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled, goSettings, active }: Props) {
+export default function ModsPage({ inst, java, javaMode, onPackInstalled, active }: Props) {
   const { tasks, done, install, refreshInstalled } = useDownloads();
 
   const [source, setSource] = useState<"modrinth" | "curseforge">("modrinth");
@@ -51,18 +49,16 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
   const verReqId = useRef(0);
 
   const canMods = !!inst && inst.loader !== "vanilla";
-  const needKey = source === "curseforge" && !cfKey.trim();
   const filterMc = kind !== "modpack" && onlyCompat && inst ? inst.mc : "";
   const filterLoader = kind === "mod" && onlyCompat && canMods ? inst!.loader : "";
 
   const search = async (offset: number, append: boolean) => {
-    if (needKey) { setHits([]); setTotal(0); setErr(""); return; }
     const id = ++reqId.current;
     setLoading(true);
     setErr("");
     try {
       const r = await invoke<Res>("mod_search", {
-        req: { source, kind, query, sort, mc: filterMc, loader: filterLoader, offset, cf_key: cfKey },
+        req: { source, kind, query, sort, mc: filterMc, loader: filterLoader, offset },
       });
       if (id !== reqId.current) return;
       setHits((prev) => (append ? [...prev, ...r.hits] : r.hits));
@@ -78,7 +74,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
     const t = setTimeout(() => search(0, false), 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, kind, query, sort, onlyCompat, inst?.id, cfKey]);
+  }, [source, kind, query, sort, onlyCompat, inst?.id]);
 
   useEffect(() => {
     if (!active || !inst || kind === "modpack") return;
@@ -94,11 +90,11 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
     const id = ++verReqId.current;
     setVerLoading(true);
     setVerErr("");
-    invoke<VersionHit[]>("mod_versions", { req: { source, id: picker.id, cf_key: cfKey } })
+    invoke<VersionHit[]>("mod_versions", { req: { source, id: picker.id } })
       .then((v) => { if (id === verReqId.current) setVerList(v); })
       .catch((e) => { if (id === verReqId.current) setVerErr(String(e)); })
       .finally(() => { if (id === verReqId.current) setVerLoading(false); });
-  }, [picker, verMode, source, cfKey]);
+  }, [picker, verMode, source]);
 
   const keyOf = (h: Hit) => taskKey(kind === "modpack" ? undefined : inst?.id, source, h.id, kind);
   const taskFor = (h: Hit) => tasks.find((t) => t.key === keyOf(h));
@@ -106,7 +102,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
   const doInstall = (h: Hit) => {
     install({
       source, kind, id: h.id, title: h.title, icon: h.icon,
-      instanceId: inst?.id, java, javaMode, cfKey, onPackInstalled,
+      instanceId: inst?.id, java, javaMode, onPackInstalled,
     });
   };
 
@@ -119,7 +115,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
     if (!picker) return;
     install({
       source, kind, id: picker.id, title: picker.title, icon: picker.icon,
-      instanceId: inst?.id, java, javaMode, cfKey, onPackInstalled,
+      instanceId: inst?.id, java, javaMode, onPackInstalled,
       versionId: verMode === "pick" ? (verChosen ?? undefined) : undefined,
     });
     closePicker();
@@ -174,12 +170,6 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
       {kind === "modpack" && <p className="hint">Installing a modpack creates a new instance with its own folder.</p>}
       {kind !== "modpack" && !inst && (
         <div className="err">Select an instance on the Home page before installing {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"}.</div>
-      )}
-      {needKey && (
-        <div className="err">
-          CurseForge needs a free API key. Get one at console.curseforge.com and paste it in Settings.{" "}
-          <button className="mini" onClick={goSettings}>Open Settings</button>
-        </div>
       )}
       {err && <div className="err">{err}</div>}
 
@@ -257,7 +247,7 @@ export default function ModsPage({ inst, cfKey, java, javaMode, onPackInstalled,
         })}
       </div>
 
-      {!loading && hits.length === 0 && !err && !needKey && <p className="hint">No results.</p>}
+      {!loading && hits.length === 0 && !err && <p className="hint">No results.</p>}
       {!loading && hits.length > 0 && hits.length < total && (
         <button className="mini loadmore" onClick={() => search(hits.length, true)}>Load more</button>
       )}

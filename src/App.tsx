@@ -18,6 +18,7 @@ type Instance = { id: string; name: string; loader: string; mc: string; version_
 type ThemeInfo = { id: string; name: string; author: string; builtin: boolean };
 type ThemeCatalog = { themes: ThemeInfo[]; warnings: string[] };
 type ThemeStylesheet = { id: string; name: string; author: string; css: string };
+type LauncherUpdateCheck = { current_version: string; latest_version: string; update_available: boolean };
 type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 const BUILTIN_THEMES: ThemeInfo[] = [
   { id: "builtin:default", name: "Default", author: "Arca Launcher", builtin: true },
@@ -56,6 +57,20 @@ const DEFAULTS: Settings = {
 
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
+  {
+    v: "0.1.3",
+    title: "Bug Fixes and Improvements",
+    items: [
+      "Fix Forge 1.7.10 downloads and legacy installer setup",
+      "Fix old Minecraft launch compatibility by selecting Java 8 when required",
+      "Fix NeoForge launch and instance handling issues",
+      "Add an Installed Content page within Instances with search and content controls",
+      "Show marketplace and embedded mod logos, plus resource-pack artwork",
+      "Improve Modrinth and CurseForge content browsing with project details",
+      "Remove credential entry from settings; use publisher-configured Microsoft sign-in and CurseForge proxy",
+      "Add a launcher update check",
+    ],
+  },
   { v: "0.1.2", title: "Customized Improvements", items: ["Add custom themes", "Add new icons", "Fix terminal launch", "Add custom backgrounds from the launcher library", "Increase maximum interface scale from 135% to 200%", "Fix bugs"] },
   { v: "0.1.1", title: "Fix and Improvements", items: ["Fix and added new features mods installation", "New logo modloader", "Added background support GIF/PNG/JPG", "Added mod list installation", "Remake UI", "Added system or launcher-managed Java runtime options", "Added fullscreen launch setting", "Added instance storage folder and install queue settings", "Renamed the Downloader page and added resource pack and shader pack support"] },
   { v: "0.1.0", title: "First Release", items: ["Initial release", "Publish github repository"] },
@@ -295,11 +310,13 @@ function InstIcon({ inst, size }: { inst: { loader: string; icon?: string }; siz
 
 function AppInner() {
   const { configureDownloads } = useDownloads();
+  const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [page, setPageNow] = useState<Page>("play");
   const [fade, setFade] = useState<"in" | "out">("in");
   const pageRef = useRef<Page>("play");
   pageRef.current = page;
   const setPage = (p: Page) => {
+    setContentInst(null);
     if (p === pageRef.current) return;
     setFade("out");
     setTimeout(() => { setPageNow(p); setFade("in"); }, 160);
@@ -323,14 +340,12 @@ function AppInner() {
   const [addPass, setAddPass] = useState("");
   const [addBusy, setAddBusy] = useState(false);
   const [addErr, setAddErr] = useState("");
-  const [msClientId, setMsClientId] = useState("");
-  const [cfKey, setCfKey] = useState("");
+  const [homeAccountPickerOpen, setHomeAccountPickerOpen] = useState(false);
 
   // instances
   const [instances, setInstances] = useState<Instance[]>([]);
   const [instId, setInstId] = useState("");
   const [activeBackground, setActiveBackground] = useState("");
-  const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuClosing, setMenuClosing] = useState(false);
   const closeMenu = () => {
@@ -374,6 +389,11 @@ function AppInner() {
   const [themesReady, setThemesReady] = useState(false);
   const [themeWarnings, setThemeWarnings] = useState<string[]>([]);
   const [themeError, setThemeError] = useState("");
+  const [releaseLinkError, setReleaseLinkError] = useState("");
+  const [networkOnline, setNetworkOnline] = useState(navigator.onLine);
+  const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateCheck | null>(null);
+  const [updateCheckError, setUpdateCheckError] = useState("");
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSt((p) => ({ ...p, [k]: v }));
   const [instanceDirectoryDraft, setInstanceDirectoryDraft] = useState("");
   const [instanceDirectoryBusy, setInstanceDirectoryBusy] = useState(false);
@@ -406,11 +426,33 @@ function AppInner() {
   const loadVersions = () =>
     invoke<VersionInfo[]>("mc_versions").then(setVinfo).catch((e) => add(`Could not load versions: ${e}`));
 
+  const checkLauncherUpdate = async () => {
+    setUpdateCheckBusy(true);
+    setUpdateCheckError("");
+    try {
+      setLauncherUpdate(await invoke<LauncherUpdateCheck>("check_launcher_update"));
+    } catch (error) {
+      setLauncherUpdate(null);
+      setUpdateCheckError(`Could not check for launcher updates: ${error}`);
+    } finally {
+      setUpdateCheckBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const updateNetworkStatus = () => setNetworkOnline(navigator.onLine);
+    window.addEventListener("online", updateNetworkStatus);
+    window.addEventListener("offline", updateNetworkStatus);
+    void checkLauncherUpdate();
+    return () => {
+      window.removeEventListener("online", updateNetworkStatus);
+      window.removeEventListener("offline", updateNetworkStatus);
+    };
+  }, []);
+
   useEffect(() => {
     // all settings now live in game/launcher/config/settings.json on the backend
     invoke<any>("load_settings").then((d) => {
-      if (d.msClientId !== undefined) setMsClientId(d.msClientId);
-      if (d.cfKey !== undefined) setCfKey(d.cfKey);
       if (d.ram !== undefined) setRam(d.ram);
       if (d.java !== undefined) setJava(d.java);
       if (d.instance !== undefined) setInstId(d.instance);
@@ -515,9 +557,9 @@ function AppInner() {
   useEffect(() => {
     if (!loadedRef.current) return;
     invoke("save_settings", {
-      data: { msClientId, cfKey, ram, java, instance: instId, settings: st, skins, showCrashReports, startup },
+      data: { ram, java, instance: instId, settings: st, skins, showCrashReports, startup },
     }).catch((e) => add(`Could not save settings: ${e}`));
-  }, [msClientId, cfKey, ram, java, instId, st, skins, showCrashReports, startup]);
+  }, [ram, java, instId, st, skins, showCrashReports, startup]);
 
   // Interface size: CSS zoom, with the shell height divided by the zoom so it still fills the window
   useEffect(() => {
@@ -615,7 +657,7 @@ function AppInner() {
         : st.gameArgs;
       await invoke("play", {
         req: {
-          instance: inst.id, ram: effRam, java: java || "java", ms_client_id: msClientId,
+          instance: inst.id, ram: effRam, java: java || "java",
           java_mode: st.javaRuntime,
           jvm_args: st.jvmArgs, game_args: gameArgs, hide: st.hide,
           volume: st.volumeOn ? st.volume : null,
@@ -637,7 +679,7 @@ function AppInner() {
     setMsCode(null);
     try {
       const r = await invoke<AccList>("add_account", {
-        req: { kind: addKind, username: addUser, password: addPass, ms_client_id: msClientId },
+        req: { kind: addKind, username: addUser, password: addPass },
       });
       applyList(r);
       setAddUser("");
@@ -689,7 +731,7 @@ function AppInner() {
     setFirstRunError("");
     try {
       await invoke("save_settings", {
-        data: { msClientId, cfKey, ram, java, instance: instId, settings: st, skins, showCrashReports, startup: true },
+        data: { ram, java, instance: instId, settings: st, skins, showCrashReports, startup: true },
       });
       setStartup(true);
       setFirstRunOpen(false);
@@ -748,6 +790,11 @@ function AppInner() {
     }
   };
   const select = (id: string) => invoke<AccList>("select_account", { id }).then(applyList);
+  const selectFromHome = (id: string) => {
+    select(id)
+      .then(() => setHomeAccountPickerOpen(false))
+      .catch((error) => add(`Could not switch account: ${error}`));
+  };
   const remove = (id: string) => invoke<AccList>("remove_account", { id }).then(applyList);
 
   // ---- instances ----
@@ -982,11 +1029,9 @@ function AppInner() {
                     <label>Password <span className="field-note">For 2FA, use password:2FACODE</span></label>
                     <input type="password" value={addPass} onChange={(e) => setAddPass(e.target.value)} autoComplete="current-password" />
                   </>)}
-                  {addKind === "microsoft" && (<>
-                    <label>Azure client ID</label>
-                    <input value={msClientId} onChange={(e) => setMsClientId(e.target.value)} placeholder="Your Microsoft application client ID" />
+                  {addKind === "microsoft" && (
                     <p className="hint onboarding-login-hint">A browser window will open to complete Microsoft sign-in.</p>
-                  </>)}
+                  )}
                 </div>
 
                 {msCode && addBusy && <div className="code onboarding-code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
@@ -1062,7 +1107,14 @@ function AppInner() {
         <div className="logo"><img className="launcher-logo-image" src={LAUNCHER_LOGO} alt="" /></div>
         <div className="brand">Arca Launcher</div>
         <div className="chips">
-          <span className="chip"><i className="dot" />{current ? KIND_LABEL[current.kind] : "No account"}</span>
+          <span className={"chip network-chip " + (networkOnline ? "online" : "offline")} aria-label={"Network " + (networkOnline ? "online" : "offline")}>
+            <i className="dot" />{networkOnline ? "Online" : "Offline"}
+          </span>
+          {launcherUpdate?.update_available && (
+            <button className="chip update-chip" onClick={() => setPage("settings")} title="Open settings to download the latest launcher release">
+              Update available · {launcherUpdate.latest_version}
+            </button>
+          )}
           <span className="chip">{inst ? `${cap(inst.loader)} ${inst.mc}` : "No instance"}</span>
           <span className="chip">{(effRam / 1024).toFixed(1)} GB RAM</span>
         </div>
@@ -1135,7 +1187,39 @@ function AppInner() {
                     <img className="skin" src={skin} alt="" onError={() => setSkinFail(true)} />
                   ) : <div className="skin ph" />}
                   <div className="pname">{shownName}</div>
-                  <button className="btn purple" onClick={() => setPage("account")}>Manage Account</button>
+                  <div className="home-account-wrap">
+                    <button
+                      className="btn purple home-account-trigger"
+                      aria-expanded={homeAccountPickerOpen}
+                      aria-haspopup="listbox"
+                      onClick={() => setHomeAccountPickerOpen((open) => !open)}
+                    >
+                      Switch Account <span className="chev">▾</span>
+                    </button>
+                    {homeAccountPickerOpen && (<>
+                      <div className="scrim" onClick={() => setHomeAccountPickerOpen(false)} />
+                      <div className="menu home-account-menu" role="listbox" aria-label="Switch account">
+                        {accounts.length === 0
+                          ? <p className="home-account-empty">No saved accounts. Add one from Accounts.</p>
+                          : accounts.map((account) => (
+                            <button
+                              key={account.id}
+                              className={"mitem home-account-option" + (account.id === selected ? " on" : "")}
+                              role="option"
+                              aria-selected={account.id === selected}
+                              onClick={() => selectFromHome(account.id)}
+                            >
+                              <Avatar acc={account} skin={skins[account.id] ?? null} />
+                              <span className="home-account-option-info">
+                                <b>{account.username}</b>
+                                <small>{KIND_LABEL[account.kind]}</small>
+                              </span>
+                              {account.id === selected && <span className="home-account-current">Current</span>}
+                            </button>
+                          ))}
+                      </div>
+                    </>)}
+                  </div>
                 </aside>
 
                 <section className="changelog">
@@ -1204,9 +1288,11 @@ function AppInner() {
                     <input type="password" value={addPass} onChange={(e) => setAddPass(e.target.value)} />
                   </>)}
                   {addKind === "microsoft" && (
+                    <>
                     <p className="hint account-notice">
-                      A browser window opens with a code to enter. {msClientId.trim() ? "" : "Set your Azure client ID in Settings first."}
+                      A browser window opens with a code to enter.
                     </p>
+                    </>
                   )}
 
                   {msCode && addBusy && <div className="code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
@@ -1220,6 +1306,11 @@ function AppInner() {
           )}
 
           {page === "versions" && (
+            contentInst ? (
+              <div key={contentInst.id} className="content-detail-enter">
+                <ContentPage inst={contentInst} onBack={() => setContentInst(null)} />
+              </div>
+            ) : (
             <section className="panel">
               <div className="ptop">
                 <div className="page-heading compact">
@@ -1360,7 +1451,11 @@ function AppInner() {
                           <button className="mini danger" onClick={() => removeInst(i.id, true)}>Remove + delete files</button>
                           <button className="mini" onClick={() => setDelId(null)}>Cancel</button>
                         </>) : (<>
-                          <button className="mini" onClick={() => setContentInst(i)}>Content</button>
+                          <button className="mini" onClick={() => {
+                            setTab("instances");
+                            setPage("versions");
+                            setContentInst(i);
+                          }}>Content</button>
                           {i.id !== instId && <button className="mini select-instance" onClick={() => setInstId(i.id)}>Select</button>}
                           <button className="mini" onClick={() => startEdit(i)}>Edit</button>
                           <button className="mini danger" onClick={() => setDelId(i.id)}>Delete</button>
@@ -1371,6 +1466,7 @@ function AppInner() {
                 </div>
               )}
             </section>
+            )
           )}
 
           {page === "console" && (
@@ -1394,151 +1490,153 @@ function AppInner() {
               </div>
             </section>
           )}
-
           {page === "settings" && (
             <section className="panel settings-page">
               <header className="page-heading">
                 <div><span className="eyebrow">PREFERENCES</span><h2>Settings</h2>
-                  <p>Fine-tune performance, game behavior, and launcher integrations.</p></div>
+                  <p>Control Minecraft performance and launcher appearance.</p></div>
               </header>
-              <div className="settings-list">
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="theme" /></span><div><h3>Appearance</h3><p>Choose a launcher style. Your choice is saved with your settings.</p></div></div>
-                  <label htmlFor="launcher-theme">Theme</label>
-                  <select id="launcher-theme" value={st.theme} disabled={!themesReady} onChange={(e) => {
-                    if (themeCatalog.some((theme) => theme.id === e.target.value))
-                      set("theme", e.target.value);
-                  }}>
-                    {themeCatalog.map((theme) => (
-                      <option key={theme.id} value={theme.id}>{theme.name} — {theme.author}</option>
-                    ))}
-                  </select>
-                  <p className="setting-note">
-                    Add CSS themes to <code>launcher/themes</code>. Theme files may include <code>Name</code> and <code>Author</code> comments; external imports and URLs are blocked.
-                  </p>
-                  <button className="mini" onClick={() => {
-                    invoke<ThemeCatalog>("list_themes")
-                      .then((catalog) => {
-                        setThemeCatalog(catalog.themes);
-                        setThemeWarnings(catalog.warnings);
-                        setThemeError("");
-                      })
-                      .catch((e) => setThemeError(`Could not reload themes: ${e}`));
-                  }}>Reload themes</button>
-                  {themeWarnings.map((warning) => <p key={warning} className="setting-note">{warning}</p>)}
-                  {themeError && <p className="setting-note">{themeError}</p>}
-                </section>
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="memory" /></span><div><h3>Memory</h3><p>Choose how much RAM Minecraft can use.</p></div></div>
-                  <label className="check">
-                    <input type="checkbox" checked={st.ramAuto} onChange={(e) => set("ramAuto", e.target.checked)} />
-                    Auto ({(autoRam(sysRam, inst?.loader ?? "vanilla") / 1024).toFixed(1)} GB{sysRam ? ` of ${(sysRam / 1024).toFixed(0)} GB` : ""})
-                  </label>
-                  <label>Memory allocation <span className="field-value">{(effRam / 1024).toFixed(1)} GB</span></label>
-                  <input type="range" disabled={st.ramAuto} min={1024} max={Math.max(2048, Math.floor((sysRam || 16384) / 512) * 512)}
-                    step={512} value={ram} onChange={(e) => setRam(+e.target.value)} />
-                </section>
+              <div className="settings-groups">
+                <div className="settings-group">
+                  <h3 className="settings-category-title">Game settings</h3>
+                  <div className="settings-grid">
+                    <section className="setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="game" /></span><div><h3>Game & Java</h3><p>Runtime, launch arguments, and in-game options.</p></div></div>
+                      <label>Java runtime</label>
+                      <select value={st.javaRuntime} onChange={(e) => {
+                        set("javaRuntime", e.target.value as Settings["javaRuntime"]);
+                        setJavaRuntimeMessage("");
+                      }}>
+                        <option value="system">System Java (default)</option>
+                        <option value="launcher">Launcher-managed Java</option>
+                      </select>
+                      <p className="setting-note">Use Java installed on your system or let the launcher download a private runtime.</p>
+                      {st.javaRuntime === "launcher" && <>
+                        <button className="btn" onClick={downloadJavaRuntime} disabled={!inst || javaRuntimeBusy}>
+                          {javaRuntimeBusy ? "Downloading Java..." : `Download Java for ${inst?.mc ?? "selected instance"}`}
+                        </button>
+                        {javaRuntimeMessage && <p className="setting-note">{javaRuntimeMessage}</p>}
+                      </>}
+                      <label>Custom Java path <span className="field-note">Leave as "java" to use the selected runtime</span></label>
+                      <input value={java} onChange={(e) => setJava(e.target.value)} />
+                      <label>JVM arguments</label>
+                      <input placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" value={st.jvmArgs} onChange={(e) => set("jvmArgs", e.target.value)} />
+                      <label>Game arguments</label>
+                      <input placeholder="--fullscreen" value={st.gameArgs} onChange={(e) => set("gameArgs", e.target.value)} />
+                      <label className="check"><input type="checkbox" checked={st.launchFullscreen} onChange={(e) => set("launchFullscreen", e.target.checked)} /> Start Minecraft in fullscreen</label>
+                      <label className="check"><input type="checkbox" checked={showCrashReports} onChange={(e) => setShowCrashReports(e.target.checked)} /> Show a crash report when the game crashes</label>
+                      <label className="check"><input type="checkbox" checked={st.volumeOn} onChange={(e) => set("volumeOn", e.target.checked)} /> Set game master volume on launch</label>
+                      <label>Master volume <span className="field-value">{st.volume}%</span></label>
+                      <input type="range" min={0} max={100} step={5} disabled={!st.volumeOn} value={st.volume} onChange={(e) => set("volume", +e.target.value)} />
+                    </section>
 
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="game" /></span><div><h3>Game</h3><p>Runtime, launch arguments, and in-game options.</p></div></div>
-                  <label>Java runtime</label>
-                  <select value={st.javaRuntime} onChange={(e) => {
-                    set("javaRuntime", e.target.value as Settings["javaRuntime"]);
-                    setJavaRuntimeMessage("");
-                  }}>
-                    <option value="system">System Java (default)</option>
-                    <option value="launcher">Launcher-managed Java</option>
-                  </select>
-                  <p className="setting-note">
-                    System uses Java installed on Windows or available in PATH. Launcher-managed downloads a private runtime into the launcher's jre folder when needed.
-                  </p>
-                  {st.javaRuntime === "launcher" && <>
-                    <button className="btn" onClick={downloadJavaRuntime} disabled={!inst || javaRuntimeBusy}>
-                      {javaRuntimeBusy ? "Downloading Java..." : `Download Java for ${inst?.mc ?? "selected instance"}`}
-                    </button>
-                    {javaRuntimeMessage && <p className="setting-note">{javaRuntimeMessage}</p>}
-                  </>}
-                  <label>Custom Java path <span className="field-note">Leave as "java" to use the selected runtime</span></label>
-                  <input value={java} onChange={(e) => setJava(e.target.value)} />
-                  <label>JVM arguments</label>
-                  <input placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" value={st.jvmArgs} onChange={(e) => set("jvmArgs", e.target.value)} />
-                  <label>Game arguments</label>
-                  <input placeholder="--fullscreen" value={st.gameArgs} onChange={(e) => set("gameArgs", e.target.value)} />
-                  <label className="check">
-                    <input type="checkbox" checked={st.launchFullscreen} onChange={(e) => set("launchFullscreen", e.target.checked)} />
-                    Start Minecraft in fullscreen
-                  </label>
-                  <label className="check">
-                    <input type="checkbox" checked={showCrashReports} onChange={(e) => setShowCrashReports(e.target.checked)} />
-                    Show a crash report when the game crashes
-                  </label>
-                  <label className="check">
-                    <input type="checkbox" checked={st.volumeOn} onChange={(e) => set("volumeOn", e.target.checked)} />
-                    Set game master volume on launch
-                  </label>
-                  <label>Master volume <span className="field-value">{st.volume}%</span></label>
-                  <input type="range" min={0} max={100} step={5} disabled={!st.volumeOn} value={st.volume} onChange={(e) => set("volume", +e.target.value)} />
-                </section>
+                    <section className="setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="memory" /></span><div><h3>Memory</h3><p>Choose how much RAM Minecraft can use.</p></div></div>
+                      <label className="check">
+                        <input type="checkbox" checked={st.ramAuto} onChange={(e) => set("ramAuto", e.target.checked)} />
+                        Auto ({(autoRam(sysRam, inst?.loader ?? "vanilla") / 1024).toFixed(1)} GB{sysRam ? ` of ${(sysRam / 1024).toFixed(0)} GB` : ""})
+                      </label>
+                      <label>Memory allocation <span className="field-value">{(effRam / 1024).toFixed(1)} GB</span></label>
+                      <input type="range" disabled={st.ramAuto} min={1024} max={Math.max(2048, Math.floor((sysRam || 16384) / 512) * 512)}
+                        step={512} value={ram} onChange={(e) => setRam(+e.target.value)} />
+                    </section>
 
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Launcher</h3><p>Set the launch experience and interface scale.</p></div></div>
-                  <label>When the game starts</label>
-                  <select value={st.hide} onChange={(e) => set("hide", e.target.value as Settings["hide"])}>
-                    <option value="keep">Keep the launcher open</option>
-                    <option value="hide">Hide it until the game closes</option>
-                    <option value="close">Close the launcher</option>
-                  </select>
-                  <label>Interface size <span className="field-value">{st.uiScale}%</span></label>
-                  <input type="range" min={80} max={200} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
-                </section>
+                    <section className="setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="version" /></span><div><h3>Version list</h3><p>Choose which Minecraft releases appear in the browser.</p></div></div>
+                      <label className="check"><input type="checkbox" checked={st.showSnapshots} onChange={(e) => set("showSnapshots", e.target.checked)} /> Snapshots</label>
+                      <label className="check"><input type="checkbox" checked={st.showExperimental} onChange={(e) => set("showExperimental", e.target.checked)} /> Experimental and special versions</label>
+                      <label className="check"><input type="checkbox" checked={st.showBeta} onChange={(e) => set("showBeta", e.target.checked)} /> Old beta</label>
+                      <label className="check"><input type="checkbox" checked={st.showAlpha} onChange={(e) => set("showAlpha", e.target.checked)} /> Old alpha</label>
+                    </section>
 
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="version" /></span><div><h3>Version list</h3><p>Choose which Minecraft releases appear in the browser.</p></div></div>
-                  <label className="check"><input type="checkbox" checked={st.showSnapshots} onChange={(e) => set("showSnapshots", e.target.checked)} /> Snapshots</label>
-                  <label className="check"><input type="checkbox" checked={st.showExperimental} onChange={(e) => set("showExperimental", e.target.checked)} /> Experimental and special versions</label>
-                  <label className="check"><input type="checkbox" checked={st.showBeta} onChange={(e) => set("showBeta", e.target.checked)} /> Old beta</label>
-                  <label className="check"><input type="checkbox" checked={st.showAlpha} onChange={(e) => set("showAlpha", e.target.checked)} /> Old alpha</label>
-                </section>
-
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="microsoft" /></span><div><h3>Microsoft account</h3><p>Required to authenticate Microsoft accounts.</p></div></div>
-                  <label>Azure client ID</label>
-                  <input value={msClientId} onChange={(e) => setMsClientId(e.target.value)} />
-                </section>
-
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="curseforge" /></span><div><h3>CurseForge</h3><p>Optional key for browsing CurseForge content.</p></div></div>
-                  <label>CurseForge API key <span className="field-note">Free at console.curseforge.com</span></label>
-                  <input type="password" value={cfKey} onChange={(e) => setCfKey(e.target.value)} />
-                </section>
-
-                <section className="setting-card">
-                  <div className="setting-title"><span className="setting-icon"><Icon n="instances" /></span><div><h3>Instances</h3><p>Manage instance storage and installation activity.</p></div></div>
-                  <label>Instance folder</label>
-                  <div className="folder-picker-row">
-                    <span className="folder-picker-path" title={displayPath(instanceDirectoryDraft) || "No folder selected"}>
-                      {displayPath(instanceDirectoryDraft) || "No folder selected"}
-                    </span>
-                    <button className="mini" onClick={chooseInstanceDirectory} disabled={instanceDirectoryBusy}>
-                      Browse…
-                    </button>
+                    <section className="setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="instances" /></span><div><h3>Instances</h3><p>Manage instance storage and installation activity.</p></div></div>
+                      <label>Instance folder</label>
+                      <div className="folder-picker-row">
+                        <span className="folder-picker-path" title={displayPath(instanceDirectoryDraft) || "No folder selected"}>
+                          {displayPath(instanceDirectoryDraft) || "No folder selected"}
+                        </span>
+                        <button className="mini" onClick={chooseInstanceDirectory} disabled={instanceDirectoryBusy}>Browse…</button>
+                      </div>
+                      <button className="btn" onClick={changeInstanceDirectory} disabled={instanceDirectoryBusy || !instanceDirectoryDraft.trim()}>
+                        {instanceDirectoryBusy ? "Moving instances..." : "Move instances to folder"}
+                      </button>
+                      <p className="setting-note">Existing instances move to this folder. Choose an empty folder and keep it available while using the launcher.</p>
+                      {instanceDirectoryMessage && <p className="setting-note">{instanceDirectoryMessage}</p>}
+                      <label>Simultaneous installs <span className="field-value">{st.downloadConcurrency}</span></label>
+                      <input type="range" min={1} max={5} step={1} value={st.downloadConcurrency}
+                        onChange={(e) => set("downloadConcurrency", +e.target.value)} />
+                      <p className="setting-note">Higher values can use more bandwidth and system resources.</p>
+                      <label className="check">
+                        <input type="checkbox" checked={st.autoClearDownloads}
+                          onChange={(e) => set("autoClearDownloads", e.target.checked)} />
+                        Automatically clear completed downloads
+                      </label>
+                      <p className="setting-note">Turn this off to keep completed downloads in the tray until dismissed.</p>
+                    </section>
                   </div>
-                  <button className="btn" onClick={changeInstanceDirectory} disabled={instanceDirectoryBusy || !instanceDirectoryDraft.trim()}>
-                    {instanceDirectoryBusy ? "Moving instances..." : "Move instances to folder"}
-                  </button>
-                  <p className="setting-note">Existing instances move to this folder. Choose an empty folder and keep it available while using the launcher.</p>
-                  {instanceDirectoryMessage && <p className="setting-note">{instanceDirectoryMessage}</p>}
-                  <label>Simultaneous installs <span className="field-value">{st.downloadConcurrency}</span></label>
-                  <input type="range" min={1} max={5} step={1} value={st.downloadConcurrency}
-                    onChange={(e) => set("downloadConcurrency", +e.target.value)} />
-                  <p className="setting-note">Higher values can use more bandwidth and system resources.</p>
-                  <label className="check">
-                    <input type="checkbox" checked={st.autoClearDownloads}
-                      onChange={(e) => set("autoClearDownloads", e.target.checked)} />
-                    Automatically clear completed downloads
-                  </label>
-                  <p className="setting-note">Turn this off to keep completed downloads in the tray until dismissed.</p>
-                </section>
+                </div>
+
+                <div className="settings-group">
+                  <h3 className="settings-category-title">Launcher settings</h3>
+                  <div className="settings-grid">
+                    <section className="setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Interface</h3><p>Set the launch experience and interface scale.</p></div></div>
+                      <label>When the game starts</label>
+                      <select value={st.hide} onChange={(e) => set("hide", e.target.value as Settings["hide"])}>
+                        <option value="keep">Keep the launcher open</option>
+                        <option value="hide">Hide it until the game closes</option>
+                        <option value="close">Close the launcher</option>
+                      </select>
+                      <label>Interface size <span className="field-value">{st.uiScale}%</span></label>
+                      <input type="range" min={80} max={200} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
+                    </section>
+
+                    <section className="setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="theme" /></span><div><h3>Theme</h3><p>Choose the look and feel of Arca Launcher.</p></div></div>
+                      <label htmlFor="launcher-theme">Active theme</label>
+                      <select id="launcher-theme" value={st.theme} disabled={!themesReady} onChange={(e) => {
+                        if (themeCatalog.some((theme) => theme.id === e.target.value))
+                          set("theme", e.target.value);
+                      }}>
+                        {themeCatalog.map((theme) => (
+                          <option key={theme.id} value={theme.id}>{theme.name} — {theme.author}</option>
+                        ))}
+                      </select>
+                      <p className="setting-note">Custom CSS themes go in <code>launcher/themes</code>. External imports and URLs are blocked.</p>
+                      <button className="mini" onClick={() => {
+                        invoke<ThemeCatalog>("list_themes")
+                          .then((catalog) => {
+                            setThemeCatalog(catalog.themes);
+                            setThemeWarnings(catalog.warnings);
+                            setThemeError("");
+                          })
+                          .catch((e) => setThemeError(`Could not reload themes: ${e}`));
+                      }}>Reload themes</button>
+                      {themeWarnings.map((warning) => <p key={warning} className="setting-note">{warning}</p>)}
+                      {themeError && <p className="setting-note setting-error">{themeError}</p>}
+                    </section>
+
+                    <section className="setting-card update-setting-card">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Launcher updates</h3><p>Review release notes and download the latest build.</p></div></div>
+                      <p className={"setting-note" + (launcherUpdate?.update_available ? " update-available" : "")}>
+                        {updateCheckBusy
+                          ? "Checking GitHub for the latest release..."
+                          : updateCheckError
+                            ? updateCheckError
+                            : launcherUpdate?.update_available
+                              ? `Version ${launcherUpdate.latest_version} is available (you have ${launcherUpdate.current_version}).`
+                              : launcherUpdate
+                                ? `You’re up to date — version ${launcherUpdate.current_version}.`
+                                : "Update status has not been checked yet."}
+                      </p>
+                      <button className="mini" onClick={() => void checkLauncherUpdate()} disabled={updateCheckBusy}>
+                        {updateCheckBusy ? "Checking..." : "Check for updates"}
+                      </button>
+                    </section>
+                  </div>
+                </div>
+
               </div>
             </section>
           )}
@@ -1547,11 +1645,9 @@ function AppInner() {
           <div className={"pagewrap " + (fade === "out" ? "out" : "in") + (page === "mods" ? "" : " hidden")}>
             <ModsPage
               inst={inst}
-              cfKey={cfKey}
               java={java}
               javaMode={st.javaRuntime}
               active={page === "mods"}
-              goSettings={() => setPage("settings")}
               onPackInstalled={(list) => {
                 const next = list.map((i) => ({
                   ...i,
@@ -1565,12 +1661,6 @@ function AppInner() {
           </div>
         </main>
       </div>
-
-      {contentInst && (
-        <Modal title={`Installed content — ${contentInst.name}`} wide onClose={() => setContentInst(null)}>
-          <ContentPage inst={contentInst} />
-        </Modal>
-      )}
 
       {backgroundPickerOpen && (
         <Modal title="Choose instance background" wide compact overlayClassName="background-picker-overlay" onClose={() => {

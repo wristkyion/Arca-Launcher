@@ -16,14 +16,23 @@ use serde_json::Value;
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
+    process::Command,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub fn emit(app: &AppHandle, msg: impl Into<String>) {
     let _ = app.emit("progress", msg.into());
 }
 
 const MAX_THEME_SIZE: u64 = 256 * 1024;
+const MICROSOFT_CLIENT_ID: Option<&str> = option_env!("ARCA_MICROSOFT_CLIENT_ID");
+
+fn microsoft_client_id() -> anyhow::Result<&'static str> {
+    MICROSOFT_CLIENT_ID
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow!("Microsoft sign-in is not configured for this launcher build."))
+}
 
 #[derive(Serialize)]
 struct ThemeInfo {
@@ -329,20 +338,110 @@ fn setup_dirs() -> (PathBuf, PathBuf, PathBuf) {
     (game, launcher, config)
 }
 
+#[derive(Serialize, Deserialize)]
+struct WindowSize {
+    width: u32,
+    height: u32,
+}
+
+fn window_size_path() -> PathBuf {
+    setup_dirs().2.join("window-size.json")
+}
+
+fn restore_window_size(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let path = window_size_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Could not read saved window size: {error}")),
+    };
+    let size: WindowSize = serde_json::from_str(&contents)
+        .map_err(|error| format!("Could not parse saved window size: {error}"))?;
+    if size.width < 640 || size.height < 400 {
+        return Err("Saved window size is smaller than the supported minimum".into());
+    }
+    window
+        .set_size(tauri::LogicalSize::new(
+            size.width as f64,
+            size.height as f64,
+        ))
+        .map_err(|error| format!("Could not restore saved window size: {error}"))
+}
+
+fn save_window_size(window: &tauri::Window) -> Result<(), String> {
+    if window
+        .is_maximized()
+        .map_err(|error| format!("Could not determine window maximized state: {error}"))?
+        || window
+            .is_fullscreen()
+            .map_err(|error| format!("Could not determine window fullscreen state: {error}"))?
+    {
+        return Ok(());
+    }
+
+    let scale_factor = window
+        .scale_factor()
+        .map_err(|error| format!("Could not read window scale factor: {error}"))?;
+    let physical_size = window
+        .inner_size()
+        .map_err(|error| format!("Could not read window size: {error}"))?;
+    let logical_size = physical_size.to_logical::<f64>(scale_factor);
+    let size = WindowSize {
+        width: logical_size.width.round() as u32,
+        height: logical_size.height.round() as u32,
+    };
+    if size.width < 640 || size.height < 400 {
+        return Err("Current window size is smaller than the supported minimum".into());
+    }
+    let path = window_size_path();
+    let contents = serde_json::to_string(&size)
+        .map_err(|error| format!("Could not serialize window size: {error}"))?;
+    std::fs::write(path, contents).map_err(|error| format!("Could not save window size: {error}"))
+}
+
 #[tauri::command]
 fn load_settings() -> Result<Value, String> {
     let (_, _, cfg) = setup_dirs();
-    let mut settings = match std::fs::read_to_string(cfg.join("settings.json")) {
+    let settings_path = cfg.join("settings.json");
+    let mut settings = match std::fs::read_to_string(&settings_path) {
         Ok(data) => {
             serde_json::from_str(&data).map_err(|e| format!("Could not parse settings: {e}"))?
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(error) => return Err(format!("Could not read settings: {error}")),
     };
-    let instance_directory = instance_root()?;
-    settings
+    let settings_object = settings
         .as_object_mut()
-        .ok_or_else(|| "Settings must be a JSON object".to_string())?
+        .ok_or_else(|| "Settings must be a JSON object".to_string())?;
+    let legacy_ms_client_id = settings_object
+        .get("msClientId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    if let Some(client_id) = legacy_ms_client_id {
+        let mut store = accounts::load(&cfg);
+        let mut migrated = false;
+        for account in &mut store.accounts {
+            if account.kind == "microsoft" && account.ms_client_id.is_none() {
+                account.ms_client_id = Some(client_id.clone());
+                migrated = true;
+            }
+        }
+        if migrated {
+            let serialized = serde_json::to_string_pretty(&store).map_err(|error| {
+                format!("Could not migrate Microsoft account settings: {error}")
+            })?;
+            std::fs::write(cfg.join("accounts.json"), serialized).map_err(|error| {
+                format!("Could not migrate Microsoft account settings: {error}")
+            })?;
+        }
+    }
+    let removed_microsoft_client_id = settings_object.remove("msClientId").is_some();
+    let removed_curseforge_key = settings_object.remove("cfKey").is_some();
+    let removed_legacy_credentials = removed_microsoft_client_id || removed_curseforge_key;
+    let instance_directory = instance_root()?;
+    settings_object
         .entry("settings")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
@@ -351,6 +450,12 @@ fn load_settings() -> Result<Value, String> {
             "instanceDirectory".into(),
             serde_json::Value::String(instance_directory.to_string_lossy().into_owned()),
         );
+    if removed_legacy_credentials {
+        let serialized = serde_json::to_string_pretty(&settings)
+            .map_err(|error| format!("Could not migrate settings: {error}"))?;
+        std::fs::write(settings_path, serialized)
+            .map_err(|error| format!("Could not remove saved integration credentials: {error}"))?;
+    }
     Ok(settings)
 }
 
@@ -542,6 +647,14 @@ fn set_instance_directory(path: String) -> Result<InstanceDirectoryResult, Strin
 }
 
 fn java_major_for_minecraft(version: &str) -> u8 {
+    let version = version
+        .strip_prefix('a')
+        .or_else(|| version.strip_prefix('b'))
+        .filter(|version| version.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or(version);
+    if version.starts_with("rd-") {
+        return 8;
+    }
     let mut parts = version
         .split('.')
         .filter_map(|part| part.parse::<u16>().ok());
@@ -564,6 +677,53 @@ fn java_major_for_minecraft(version: &str) -> u8 {
     } else {
         8
     }
+}
+
+fn requires_java_8_for_legacy_launchwrapper(version: &str) -> bool {
+    if version.starts_with("rd-") {
+        return true;
+    }
+    let version = version
+        .strip_prefix('a')
+        .or_else(|| version.strip_prefix('b'))
+        .filter(|version| version.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or(version);
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| part.parse::<u16>().ok());
+    matches!((parts.next(), parts.next()), (Some(1), Some(minor)) if minor <= 12)
+}
+
+fn parse_java_major(text: &str) -> anyhow::Result<u8> {
+    let version = text
+        .split('"')
+        .nth(1)
+        .ok_or_else(|| anyhow!("Java did not report a recognizable version"))?;
+    let mut parts = version.split('.');
+    let first = parts
+        .next()
+        .and_then(|part| part.parse::<u8>().ok())
+        .ok_or_else(|| anyhow!("Java did not report a recognizable version"))?;
+    if first == 1 {
+        parts
+            .next()
+            .and_then(|part| part.parse::<u8>().ok())
+            .ok_or_else(|| anyhow!("Java did not report a recognizable version"))
+    } else {
+        Ok(first)
+    }
+}
+
+fn detect_java_major(java: &str) -> anyhow::Result<u8> {
+    let output = Command::new(java).arg("-version").output()?;
+    if !output.status.success() {
+        anyhow::bail!("Java version check exited with {}", output.status);
+    }
+    parse_java_major(&format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 fn launcher_java_path(major: u8) -> PathBuf {
@@ -662,9 +822,40 @@ pub(crate) async fn pick_java(
 ) -> anyhow::Result<String> {
     let user = user.trim();
     if !user.is_empty() && user != "java" {
+        if requires_java_8_for_legacy_launchwrapper(mc_version) {
+            let major = detect_java_major(user).map_err(|error| {
+                anyhow!("Could not check the selected Java runtime ({user}): {error}")
+            })?;
+            if major > 8 {
+                anyhow::bail!(
+                    "Minecraft {mc_version} uses an old LaunchWrapper that requires Java 8. The selected Java is {major}; set Custom Java path to a Java 8 runtime or clear that field to use the compatible launcher runtime."
+                );
+            }
+        }
         return Ok(user.to_string());
     }
     match runtime_mode {
+        "system" if requires_java_8_for_legacy_launchwrapper(mc_version) => {
+            match detect_java_major("java") {
+                Ok(major) if major <= 8 => return Ok("java".into()),
+                Ok(major) => emit(
+                    app,
+                    format!(
+                        "Minecraft {mc_version} needs Java 8; using a launcher-managed runtime instead of system Java {major}."
+                    ),
+                ),
+                Err(error) => emit(
+                    app,
+                    format!(
+                        "Could not use system Java for Minecraft {mc_version} ({error}); downloading a compatible Java 8 runtime."
+                    ),
+                ),
+            }
+            Ok(ensure_launcher_java(app, mc_version)
+                .await?
+                .to_string_lossy()
+                .into_owned())
+        }
         "system" => Ok("java".into()),
         "launcher" => Ok(ensure_launcher_java(app, mc_version)
             .await?
@@ -764,6 +955,78 @@ fn open_instance_folder(req: ContentReq) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_launcher_releases() -> Result<(), String> {
+    webbrowser::open("https://github.com/wristkyion/Arca-Launcher/releases")
+        .map(|_| ())
+        .map_err(|error| format!("Could not open launcher releases: {error}"))
+}
+
+#[derive(Serialize)]
+struct LauncherUpdateCheck {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    fn components(version: &str) -> Option<Vec<u64>> {
+        let version = version
+            .strip_prefix('v')
+            .or_else(|| version.strip_prefix('V'))
+            .unwrap_or(version)
+            .split(|character| character == '-' || character == '+')
+            .next()?;
+        let parts: Vec<u64> = version
+            .split('.')
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        (!parts.is_empty()).then_some(parts)
+    }
+
+    let (Some(candidate), Some(current)) = (components(candidate), components(current)) else {
+        return false;
+    };
+    let width = candidate.len().max(current.len());
+    (0..width)
+        .map(|index| {
+            (
+                candidate.get(index).copied().unwrap_or(0),
+                current.get(index).copied().unwrap_or(0),
+            )
+        })
+        .find_map(|(candidate, current)| (candidate != current).then_some(candidate > current))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn check_launcher_update() -> Result<LauncherUpdateCheck, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let response = game::http()
+        .get("https://api.github.com/repos/wristkyion/Arca-Launcher/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("Could not check GitHub releases: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Could not check GitHub releases: {error}"))?;
+    let release: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Could not read latest GitHub release: {error}"))?;
+    let latest_version = release["tag_name"]
+        .as_str()
+        .ok_or_else(|| "Latest GitHub release has no version tag".to_string())?
+        .to_string();
+
+    Ok(LauncherUpdateCheck {
+        update_available: version_is_newer(&latest_version, &current_version),
+        current_version,
+        latest_version,
+    })
+}
+
 // ------------------------------------------------------------ accounts
 
 #[derive(Serialize)]
@@ -801,7 +1064,6 @@ struct AddReq {
     kind: String,
     username: String,
     password: String,
-    ms_client_id: String,
 }
 
 #[tauri::command]
@@ -887,16 +1149,15 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
         }
         // device-code login, then save the refresh token
         "microsoft" => {
-            if req.ms_client_id.trim().is_empty() {
-                anyhow::bail!("Enter your Azure client ID first (Settings tab)");
-            }
-            let (a, rt) = auth::ms_new(&app, req.ms_client_id.trim()).await?;
+            let client_id = microsoft_client_id()?;
+            let (a, rt) = auth::ms_new(&app, client_id).await?;
             Stored {
                 id: new_id(),
                 kind: "microsoft".into(),
                 username: a.username,
                 uuid: a.uuid,
                 refresh_token: rt,
+                ms_client_id: Some(client_id.to_string()),
                 ..Default::default()
             }
         }
@@ -1009,7 +1270,6 @@ struct PlayReq {
     java: String,
     #[serde(default = "default_java_runtime")]
     java_mode: String,
-    ms_client_id: String,
     jvm_args: String,
     game_args: String,
     hide: String,
@@ -1120,10 +1380,17 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
             a
         }
         "microsoft" => {
-            if req.ms_client_id.trim().is_empty() {
-                anyhow::bail!("Enter your Azure client ID (Settings tab)");
-            }
-            let (a, rt) = auth::ms_resume(req.ms_client_id.trim(), &saved.refresh_token).await?;
+            let saved_client_id = saved
+                .ms_client_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            let client_id = match saved_client_id {
+                Some(id) => id,
+                None => microsoft_client_id()?.to_owned(),
+            };
+            let (a, rt) = auth::ms_resume(&client_id, &saved.refresh_token).await?;
             store.accounts[idx].refresh_token = rt;
             store.accounts[idx].username = a.username.clone();
             a
@@ -1330,6 +1597,22 @@ fn remove_instance(req: RemoveReq) -> Result<Vec<Instance>, String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let window = app
+                .get_webview_window("main")
+                .ok_or("Main window is not available during startup")?;
+            if let Err(error) = restore_window_size(&window) {
+                eprintln!("{error}");
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Err(error) = save_window_size(window) {
+                    eprintln!("{error}");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             mc_versions,
             system_ram,
@@ -1354,6 +1637,8 @@ fn main() {
             toggle_content,
             delete_content,
             open_instance_folder,
+            open_launcher_releases,
+            check_launcher_update,
             load_settings,
             save_settings,
             list_themes,
@@ -1398,5 +1683,47 @@ mod theme_tests {
     fn rejects_external_css_resources_even_when_comments_split_the_token() {
         assert!(validate_theme_css("a { background: u/**/rl(https://example.com/x); }").is_err());
         assert!(validate_theme_css("@im/**/port 'https://example.com/theme.css';").is_err());
+    }
+}
+
+#[cfg(test)]
+mod launcher_update_tests {
+    use super::version_is_newer;
+
+    #[test]
+    fn compares_release_versions_numerically() {
+        assert!(version_is_newer("0.1.3", "0.1.2"));
+        assert!(version_is_newer("v0.2.0", "0.1.9"));
+        assert!(!version_is_newer("0.1.2", "0.1.2"));
+        assert!(!version_is_newer("0.1.1", "0.1.2"));
+        assert!(!version_is_newer("not-a-version", "0.1.2"));
+    }
+}
+
+#[cfg(test)]
+mod java_runtime_tests {
+    use super::{
+        java_major_for_minecraft, parse_java_major, requires_java_8_for_legacy_launchwrapper,
+    };
+
+    #[test]
+    fn detects_java_major_for_legacy_and_modern_version_strings() {
+        assert_eq!(parse_java_major("java version \"1.8.0_452\"").unwrap(), 8);
+        assert_eq!(parse_java_major("openjdk version \"17.0.15\"").unwrap(), 17);
+        assert_eq!(parse_java_major("java version \"25.0.4\"").unwrap(), 25);
+    }
+
+    #[test]
+    fn requires_java_8_for_legacy_launchwrapper_versions() {
+        assert!(requires_java_8_for_legacy_launchwrapper("1.7.10"));
+        assert!(requires_java_8_for_legacy_launchwrapper("1.12.2"));
+        assert!(requires_java_8_for_legacy_launchwrapper("a1.2.2"));
+        assert!(requires_java_8_for_legacy_launchwrapper("b1.7.3"));
+        assert!(requires_java_8_for_legacy_launchwrapper("rd-132211"));
+        assert!(!requires_java_8_for_legacy_launchwrapper("1.13"));
+        assert_eq!(java_major_for_minecraft("1.7.10"), 8);
+        assert_eq!(java_major_for_minecraft("a1.2.2"), 8);
+        assert_eq!(java_major_for_minecraft("b1.7.3"), 8);
+        assert_eq!(java_major_for_minecraft("rd-132211"), 8);
     }
 }

@@ -14,6 +14,8 @@ pub struct Stored {
     pub client_token: String, // Ely.by
     #[serde(default)]
     pub refresh_token: String, // Microsoft
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms_client_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

@@ -1,0 +1,4 @@
+name = "arca-launcher-curseforge-proxy"
+main = "src/index.js"
+compatibility_date = "2026-10-17"
+

@@ -15,6 +15,8 @@ export type InstalledFile = {
   version: string;
   channel: "release" | "beta" | "alpha" | string;
   dependency: boolean;
+  source: "modrinth" | "curseforge" | string;
+  icon: string;
 };
 
 export type Task = {
@@ -39,7 +41,6 @@ type StartArgs = {
   instanceId?: string;
   java: string;
   javaMode: "system" | "launcher";
-  cfKey: string;
   /** A specific version/file id to install instead of the newest compatible one. */
   versionId?: string;
   onPackInstalled?: (list: Inst[]) => void;
@@ -193,7 +194,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       try {
         if (a.kind === "mod") {
           const files = await invoke<InstalledFile[]>("mod_install", {
-            req: { source: a.source, id: a.id, title: a.title, instance: a.instanceId, cf_key: a.cfKey, version_id: a.versionId ?? null },
+            req: { source: a.source, id: a.id, title: a.title, icon: a.icon, instance: a.instanceId, version_id: a.versionId ?? null },
           });
           const root = files.find((f) => !f.dependency) ?? files[0];
           const channelLabel = root && root.channel !== "release" ? ` · ${root.channel}` : "";
@@ -204,7 +205,8 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
           const files = await invoke<InstalledFile[]>("content_install", {
             req: {
               source: a.source, kind: a.kind, id: a.id, title: a.title,
-              instance: a.instanceId, cf_key: a.cfKey, version_id: a.versionId ?? null,
+              icon: a.icon,
+              instance: a.instanceId, version_id: a.versionId ?? null,
             },
           });
           const root = files[0];
@@ -214,7 +216,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
           patch(key, { phase: "done", detail: msg, files });
         } else {
           const list = await invoke<Inst[]>("modpack_install", {
-            req: { source: a.source, id: a.id, name: a.title, java: a.java || "java", java_mode: a.javaMode, cf_key: a.cfKey },
+            req: { source: a.source, id: a.id, name: a.title, java: a.java || "java", java_mode: a.javaMode },
           });
           setDone((d) => ({ ...d, [key]: [] }));
           patch(key, { phase: "done", detail: "Instance created", pct: 100 });

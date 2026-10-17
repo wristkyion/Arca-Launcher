@@ -1,5 +1,5 @@
 //! Minecraft content downloads from Modrinth and CurseForge.
-use crate::{emit, game, instances, instances::Instance};
+use crate::{content, emit, game, instances, instances::Instance};
 use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -21,27 +21,62 @@ const CF: &str = "https://api.curseforge.com/v1";
 
 // ------------------------------------------------------------ helpers
 
+fn curseforge_proxy_url(url: &str) -> Result<String> {
+    let path = url
+        .strip_prefix(CF)
+        .ok_or_else(|| anyhow!("Invalid CurseForge API URL"))?;
+    let base = option_env!("ARCA_CURSEFORGE_PROXY_URL")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            anyhow!("CurseForge integration is not configured for this launcher build.")
+        })?;
+    map_curseforge_proxy_url(base, path)
+}
+
+fn map_curseforge_proxy_url(base: &str, path: &str) -> Result<String> {
+    if !base.starts_with("https://")
+        && !base.starts_with("http://127.0.0.1")
+        && !base.starts_with("http://localhost")
+    {
+        return Err(anyhow!("The CurseForge proxy must use HTTPS."));
+    }
+    Ok(format!("{}{}", base.trim_end_matches('/'), path))
+}
+
 async fn jget(
     c: &reqwest::Client,
     url: &str,
     q: &[(&str, String)],
-    key: Option<&str>,
+    _key: Option<&str>,
 ) -> Result<Value> {
-    let mut r = c.get(url).query(q);
-    if let Some(k) = key {
-        r = r.header("x-api-key", k);
-    }
-    let resp = r.send().await?;
+    let proxy_url;
+    let request_url = if url.starts_with(CF) {
+        proxy_url = curseforge_proxy_url(url)?;
+        proxy_url.as_str()
+    } else {
+        url
+    };
+    let resp = c.get(request_url).query(q).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        if status.as_u16() == 403 && key.is_some() {
+        let body = resp.text().await?;
+        let detail = body.chars().take(300).collect::<String>();
+        if url.starts_with(CF) && matches!(status.as_u16(), 401 | 403) {
             return Err(anyhow!(
-                "CurseForge rejected the API key (403). Check the key in Settings."
+                "CurseForge returned {status} for {request_url}: {detail}"
             ));
         }
-        return Err(anyhow!("Server answered {status} for {url}"));
+        return Err(anyhow!(
+            "Server answered {status} for {request_url}: {detail}"
+        ));
     }
     Ok(resp.json().await?)
+}
+
+async fn cf_post_json(c: &reqwest::Client, url: &str, body: &Value) -> Result<reqwest::Response> {
+    let request_url = curseforge_proxy_url(url)?;
+    Ok(c.post(request_url).json(body).send().await?)
 }
 
 fn safe_name(n: &str) -> Result<String> {
@@ -80,16 +115,6 @@ fn cf_loader(l: &str) -> Option<u32> {
         "quilt" => Some(5),
         "neoforge" => Some(6),
         _ => None,
-    }
-}
-
-fn need_key(key: &str) -> Result<()> {
-    if key.trim().is_empty() {
-        Err(anyhow!(
-            "Add your CurseForge API key in Settings (free at console.curseforge.com)."
-        ))
-    } else {
-        Ok(())
     }
 }
 
@@ -133,20 +158,40 @@ fn cf_channel(release_type: i64) -> &'static str {
     }
 }
 
-async fn cf_project_name(c: &reqwest::Client, key: &str, mod_id: &str) -> String {
-    jget(c, &format!("{CF}/mods/{mod_id}"), &[], Some(key))
+async fn cf_project_details(c: &reqwest::Client, mod_id: &str) -> (String, String) {
+    let project = jget(c, &format!("{CF}/mods/{mod_id}"), &[], None)
         .await
-        .ok()
-        .and_then(|v| v["data"]["name"].as_str().map(String::from))
-        .unwrap_or_else(|| mod_id.to_string())
+        .ok();
+    (
+        project
+            .as_ref()
+            .and_then(|v| v["data"]["name"].as_str())
+            .unwrap_or(mod_id)
+            .to_string(),
+        project
+            .as_ref()
+            .and_then(|v| v["data"]["logo"]["thumbnailUrl"].as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
-async fn mr_project_title(c: &reqwest::Client, pid: &str) -> String {
-    jget(c, &format!("{MR}/project/{pid}"), &[], None)
+async fn mr_project_details(c: &reqwest::Client, pid: &str) -> (String, String) {
+    let project = jget(c, &format!("{MR}/project/{pid}"), &[], None)
         .await
-        .ok()
-        .and_then(|v| v["title"].as_str().map(String::from))
-        .unwrap_or_else(|| pid.to_string())
+        .ok();
+    (
+        project
+            .as_ref()
+            .and_then(|v| v["title"].as_str())
+            .unwrap_or(pid)
+            .to_string(),
+        project
+            .as_ref()
+            .and_then(|v| v["icon_url"].as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
 // ------------------------------------------------------------ search
@@ -178,7 +223,6 @@ pub struct SearchReq {
     pub mc: String,     // "" = any
     pub loader: String, // "" = any
     pub offset: u32,
-    pub cf_key: String,
 }
 
 fn default_sort() -> String {
@@ -248,7 +292,6 @@ async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
 }
 
 async fn cf_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
-    need_key(&r.cf_key)?;
     let class = match r.kind.as_str() {
         "mod" => 6,
         "modpack" => 4471,
@@ -280,7 +323,7 @@ async fn cf_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
     if let Some(t) = cf_loader(&r.loader) {
         q.push(("modLoaderType", t.to_string()));
     }
-    let v = jget(c, &format!("{CF}/mods/search"), &q, Some(r.cf_key.trim())).await?;
+    let v = jget(c, &format!("{CF}/mods/search"), &q, None).await?;
     let hits = v["data"]
         .as_array()
         .into_iter()
@@ -316,7 +359,6 @@ pub struct VersionHit {
 pub struct VersionsReq {
     pub source: String,
     pub id: String, // project id / mod id
-    pub cf_key: String,
 }
 
 #[tauri::command]
@@ -348,12 +390,11 @@ async fn versions(req: VersionsReq) -> Result<Vec<VersionHit>> {
                 .collect())
         }
         "curseforge" => {
-            need_key(&req.cf_key)?;
             let v = jget(
                 &c,
                 &format!("{CF}/mods/{}/files", req.id),
                 &[("pageSize", "50".to_string())],
-                Some(req.cf_key.trim()),
+                None,
             )
             .await?;
             Ok(v["data"]
@@ -388,12 +429,13 @@ pub struct InstallReq {
     /// search results), so the root entry doesn't need an extra lookup just for its name.
     pub title: String,
     pub instance: String,
-    pub cf_key: String,
     /// A specific Modrinth version id / CurseForge file id to install for the root project.
     /// None = pick the newest version that fits the instance (the old behaviour). Dependencies
     /// are always resolved to their own newest compatible version, regardless of this.
     #[serde(default)]
     pub version_id: Option<String>,
+    #[serde(default)]
+    pub icon: String,
 }
 
 /// One installed content file, with its version/channel and whether it was pulled in as a dependency.
@@ -406,6 +448,8 @@ pub struct InstalledFile {
     /// "release" | "beta" | "alpha"
     pub channel: String,
     pub dependency: bool,
+    pub source: String,
+    pub icon: String,
 }
 
 #[tauri::command]
@@ -423,7 +467,8 @@ async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> 
     let mods = instance_dir.join("mods");
     fs::create_dir_all(&mods)?;
     let c = game::http();
-    match req.source.as_str() {
+    let source = req.source.clone();
+    let mut files = match source.as_str() {
         "modrinth" => {
             mr_install(
                 &app,
@@ -437,7 +482,6 @@ async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> 
             .await
         }
         "curseforge" => {
-            need_key(&req.cf_key)?;
             cf_install(
                 &app,
                 &c,
@@ -445,13 +489,37 @@ async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> 
                 &inst,
                 &req.id,
                 &req.title,
-                req.cf_key.trim(),
                 req.version_id.as_deref(),
             )
             .await
         }
         s => Err(anyhow!("Unknown source {s}")),
+    }?;
+    for file in &mut files {
+        file.source = source.clone();
+        if !file.dependency {
+            file.icon = req.icon.clone();
+        }
     }
+    content::record(
+        &instance_dir,
+        "mods",
+        files.iter().map(|file| {
+            (
+                file.file_name.clone(),
+                content::ContentMetadata {
+                    project_id: file.project_id.clone(),
+                    project_name: file.project_name.clone(),
+                    source: file.source.clone(),
+                    icon: file.icon.clone(),
+                    version: file.version.clone(),
+                    channel: file.channel.clone(),
+                    dependency: file.dependency,
+                },
+            )
+        }),
+    )?;
+    Ok(files)
 }
 
 #[derive(Deserialize)]
@@ -460,8 +528,9 @@ pub struct ContentInstallReq {
     pub kind: String, // resourcepack | shader
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub icon: String,
     pub instance: String,
-    pub cf_key: String,
     #[serde(default)]
     pub version_id: Option<String>,
 }
@@ -535,28 +604,16 @@ async fn install_content(app: AppHandle, req: ContentInstallReq) -> Result<Vec<I
             )
         }
         "curseforge" => {
-            need_key(&req.cf_key)?;
             let file = if let Some(id) = req.version_id.as_deref() {
-                let response = jget(
-                    &c,
-                    &format!("{CF}/mods/{}/files/{id}", req.id),
-                    &[],
-                    Some(req.cf_key.trim()),
-                )
-                .await?;
+                let response =
+                    jget(&c, &format!("{CF}/mods/{}/files/{id}", req.id), &[], None).await?;
                 response["data"].clone()
             } else {
                 let q = vec![
                     ("pageSize", "50".to_string()),
                     ("gameVersion", inst.mc.clone()),
                 ];
-                let response = jget(
-                    &c,
-                    &format!("{CF}/mods/{}/files", req.id),
-                    &q,
-                    Some(req.cf_key.trim()),
-                )
-                .await?;
+                let response = jget(&c, &format!("{CF}/mods/{}/files", req.id), &q, None).await?;
                 let files = response["data"]
                     .as_array()
                     .filter(|items| !items.is_empty())
@@ -586,6 +643,22 @@ async fn install_content(app: AppHandle, req: ContentInstallReq) -> Result<Vec<I
     }
     emit(&app, format!("Downloading {file_name}"));
     game::download(&c, &url, &target.join(&file_name)).await?;
+    content::record(
+        &instance_dir,
+        folder,
+        [(
+            file_name.clone(),
+            content::ContentMetadata {
+                project_id: req.id.clone(),
+                project_name: req.title.clone(),
+                source: req.source.clone(),
+                icon: req.icon.clone(),
+                version: version.clone(),
+                channel: channel.clone(),
+                dependency: false,
+            },
+        )],
+    )?;
 
     Ok(vec![InstalledFile {
         project_id: req.id,
@@ -594,6 +667,8 @@ async fn install_content(app: AppHandle, req: ContentInstallReq) -> Result<Vec<I
         version,
         channel,
         dependency: false,
+        source: req.source,
+        icon: req.icon,
     }])
 }
 
@@ -651,9 +726,9 @@ async fn mr_fetch_one(
         })
         .collect();
 
-    let project_name = match known_title {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => mr_project_title(c, project).await,
+    let (project_name, icon) = match known_title {
+        Some(t) if !t.trim().is_empty() => (t.to_string(), String::new()),
+        _ => mr_project_details(c, project).await,
     };
     let info = InstalledFile {
         project_id: project.to_string(),
@@ -665,6 +740,8 @@ async fn mr_fetch_one(
             .unwrap_or("release")
             .to_string(),
         dependency,
+        source: String::new(),
+        icon,
     };
     Ok((info, deps))
 }
@@ -720,7 +797,6 @@ async fn cf_fetch_one(
     c: &reqwest::Client,
     mods: &Path,
     inst: &Instance,
-    key: &str,
     mod_id: &str,
     known_title: Option<&str>,
     dependency: bool,
@@ -730,13 +806,7 @@ async fn cf_fetch_one(
     let best = match target_file {
         // the person picked an exact file from the version list
         Some(fid) => {
-            let v = jget(
-                c,
-                &format!("{CF}/mods/{mod_id}/files/{fid}"),
-                &[],
-                Some(key),
-            )
-            .await?;
+            let v = jget(c, &format!("{CF}/mods/{mod_id}/files/{fid}"), &[], None).await?;
             fetched = v["data"].clone();
             &fetched
         }
@@ -749,7 +819,7 @@ async fn cf_fetch_one(
             if let Some(t) = cf_loader(&inst.loader) {
                 q.push(("modLoaderType", t.to_string()));
             }
-            let v = jget(c, &format!("{CF}/mods/{mod_id}/files"), &q, Some(key)).await?;
+            let v = jget(c, &format!("{CF}/mods/{mod_id}/files"), &q, None).await?;
             let arr = v["data"]
                 .as_array()
                 .cloned()
@@ -774,9 +844,9 @@ async fn cf_fetch_one(
         .filter_map(|d| d["modId"].as_u64().map(|x| x.to_string()))
         .collect();
 
-    let project_name = match known_title {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => cf_project_name(c, key, mod_id).await,
+    let (project_name, icon) = match known_title {
+        Some(t) if !t.trim().is_empty() => (t.to_string(), String::new()),
+        _ => cf_project_details(c, mod_id).await,
     };
     let info = InstalledFile {
         project_id: mod_id.to_string(),
@@ -785,6 +855,8 @@ async fn cf_fetch_one(
         version: best["displayName"].as_str().unwrap_or("").to_string(),
         channel: cf_channel(best["releaseType"].as_i64().unwrap_or(1)).to_string(),
         dependency,
+        source: String::new(),
+        icon,
     };
     Ok((info, deps))
 }
@@ -796,7 +868,6 @@ async fn cf_install(
     inst: &Instance,
     project: &str,
     title: &str,
-    key: &str,
     root_version: Option<&str>,
 ) -> Result<Vec<InstalledFile>> {
     // (mod id, is this a dependency, known title)
@@ -814,7 +885,6 @@ async fn cf_install(
             c,
             mods,
             inst,
-            key,
             &id,
             known_title.as_deref(),
             dependency,
@@ -844,7 +914,6 @@ pub struct PackReq {
     pub java: String,
     #[serde(default = "default_java_runtime")]
     pub java_mode: String,
-    pub cf_key: String,
 }
 
 fn default_java_runtime() -> String {
@@ -887,12 +956,12 @@ async fn mr_pack_file(c: &reqwest::Client, id: &str) -> Result<(String, String)>
     ))
 }
 
-async fn cf_pack_file(c: &reqwest::Client, id: &str, key: &str) -> Result<(String, String)> {
+async fn cf_pack_file(c: &reqwest::Client, id: &str) -> Result<(String, String)> {
     let v = jget(
         c,
         &format!("{CF}/mods/{id}/files"),
         &[("pageSize", "20".to_string())],
-        Some(key),
+        None,
     )
     .await?;
     let arr = v["data"]
@@ -1027,10 +1096,7 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     // 1. download the pack archive
     let (url, fname) = match req.source.as_str() {
         "modrinth" => mr_pack_file(&c, &req.id).await?,
-        "curseforge" => {
-            need_key(&req.cf_key)?;
-            cf_pack_file(&c, &req.id, req.cf_key.trim()).await?
-        }
+        "curseforge" => cf_pack_file(&c, &req.id).await?,
         s => return Err(anyhow!("Unknown source {s}")),
     };
     let cache = launcher.join("cache");
@@ -1072,12 +1138,12 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     }
     if !plan.cf_files.is_empty() {
         for chunk in plan.cf_files.chunks(100) {
-            let resp = c
-                .post(format!("{CF}/mods/files"))
-                .header("x-api-key", req.cf_key.trim())
-                .json(&json!({ "fileIds": chunk }))
-                .send()
-                .await?;
+            let resp = cf_post_json(
+                &c,
+                &format!("{CF}/mods/files"),
+                &json!({ "fileIds": chunk }),
+            )
+            .await?;
             if !resp.status().is_success() {
                 return Err(anyhow!(
                     "CurseForge answered {} while listing the pack files",
@@ -1143,4 +1209,18 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     instances::save(&cfg, &list).map_err(|e| anyhow!("{e}"))?;
     emit(&app, "Instance ready");
     Ok(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_curseforge_proxy_url;
+
+    #[test]
+    fn curseforge_proxy_preserves_api_path_and_requires_https() {
+        assert_eq!(
+            map_curseforge_proxy_url("https://proxy.example/v1", "/mods/search").unwrap(),
+            "https://proxy.example/v1/mods/search"
+        );
+        assert!(map_curseforge_proxy_url("http://proxy.example/v1", "/mods/search").is_err());
+    }
 }
