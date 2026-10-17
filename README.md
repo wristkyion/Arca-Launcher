@@ -1,10 +1,10 @@
-<h1 align="center">Arca-Launcher</h1>
+<h1 align="center">Arca Launcher</h1>
 
 <p align="center">
-  A custom Minecraft launcher built with Tauri, Vite, Rust, and TypeScript.
+  A custom Minecraft launcher built with Tauri, Rust, React, and TypeScript.
 </p>
 
-Arca-Launcher is an indie project focused on creating a personalized and user-friendly Minecraft launcher with its own design and features.
+Arca Launcher is an independent project for creating and managing Minecraft instances, signing in with supported account types, and browsing game content.
 
 This project is still in early development, so some features may be incomplete, change over time, or contain bugs.
 
@@ -35,19 +35,150 @@ This project is still in early development, so some features may be incomplete, 
   </tr>
 </table>
 
-Features
+> **Early development:** features and setup may change. If you encounter a problem, open an issue and include the steps to reproduce it and the relevant error message. Never post passwords, access tokens, or API keys.
 
-- Custom Design — A unique interface designed specifically for Arca-Launcher.
-- Custom Instances — Create instances with your own name, description, logo, and background.
-- Installed Content — View installed mods, resource packs, and shader packs for each instance, and open their folders.
-- Content Downloader — Search and download mods, modpacks, resource packs, and shader packs from Modrinth and CurseForge, with relevance, download-count, and recently-updated sorting.
-- Multi-Account Support — Manage Offline, Microsoft, and Ely.by accounts.
-- Simple Settings — Adjust memory, system or launcher-managed Java, fullscreen launch, instance storage, and install concurrency and cleanup.
-- CSS Themes — Choose a built-in theme or add a CSS-only custom theme with name and author metadata.
+## Features
 
-Custom Themes
+- Create separate Minecraft instances with custom names, icons, and backgrounds.
+- Install Minecraft releases, snapshots, and supported older versions.
+- Manage Offline, Ely.by, and Microsoft accounts.
+- Browse and install mods, modpacks, resource packs, and shader packs from Modrinth and CurseForge.
+- View and manage installed content for each instance.
+- Choose system Java or a launcher-managed Java runtime, adjust memory, and configure launch options.
+- Customize the launcher with built-in or local CSS themes.
 
-Built-in themes live in `assets/themes/`. To add a custom theme, create a `.css` file in `launcher/themes/` next to the existing `launcher/config` folder, then select **Reload themes** in Settings. Each file can declare its display name and author in a CSS comment:
+## Changelog
+
+### 0.1.3 — Bug Fixes and Improvements
+
+**Bug fixes**
+
+- Fixed Forge 1.7.10 downloads by using the correct legacy Maven artifact, and fixed installation for older Forge installers that do not support the modern `installClient` option.
+- Fixed launch failures for legacy Minecraft versions that require Java 8, including Alpha, Beta, and early `rd-` versions, by selecting a compatible runtime.
+- Fixed modded NeoForge launch issues and other instance handling problems.
+- Fixed installed-content navigation so opening content stays within Instances, keeps the Instances navigation item selected, and returns to the instance list correctly.
+- Improved visibility of instance icons in the content view.
+
+**Features and improvements**
+
+- Added an Installed Content page within each instance for browsing mods, resource packs, and shader packs, with search, enabled-state controls, and folder access.
+- Added content artwork and metadata: marketplace project icons for supported installs, logos discovered inside mod JARs, and `pack.png` artwork from resource-pack ZIP files.
+- Added a more user-friendly downloader experience with project names, icons, and details from Modrinth and CurseForge.
+- Added publisher-configured Microsoft sign-in and a CurseForge proxy integration, removing credential entry fields from user settings. CurseForge still requires publisher-approved API access.
+- Added a launcher update check.
+
+## Install a release
+
+1. Open [Arca Launcher releases](https://github.com/wristkyion/Arca-Launcher/releases).
+2. Download the latest installer for your operating system. On Windows, use the `.exe` setup installer or `.msi` package if both are provided.
+3. Run the installer and follow its prompts.
+4. Start Arca Launcher and follow the first-run setup. You can add an account or create an instance later if you prefer.
+
+### Windows requirement
+
+Arca Launcher requires the **Microsoft Edge WebView2 Runtime**. It is already included on most up-to-date Windows installations. If the launcher reports that it is missing, install the [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/), then reopen the launcher.
+
+## Build from source
+
+### Requirements
+
+- Git
+- [Node.js](https://nodejs.org/) 18 or newer (includes npm)
+- [Rust](https://www.rust-lang.org/tools/install) stable toolchain
+- Windows: [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **Desktop development with C++** and a Windows SDK
+- Windows: WebView2 Runtime
+
+For macOS or Linux, install the native prerequisites listed in the [Tauri v2 prerequisites guide](https://v2.tauri.app/start/prerequisites/).
+
+### Clone and install dependencies
+
+```powershell
+git clone https://github.com/wristkyion/Arca-Launcher.git
+Set-Location Arca-Launcher
+npm ci
+```
+
+### Run the desktop app in development
+
+Publisher settings are needed to test Microsoft login and CurseForge. If you omit them, the rest of the launcher can still be developed, but those integrations will report that they are not configured.
+
+```powershell
+$env:ARCA_MICROSOFT_CLIENT_ID = "<publisher-application-client-id>"
+$env:ARCA_CURSEFORGE_PROXY_URL = "https://<publisher-worker>.workers.dev/v1"
+npm run tauri dev
+```
+
+To run only the frontend in a browser while working on UI code, use `npm run dev`. Native Tauri commands will not be available in browser-only mode.
+
+### Build an installer
+
+Set the same publisher configuration in the build shell, then run:
+
+```powershell
+$env:ARCA_MICROSOFT_CLIENT_ID = "<publisher-application-client-id>"
+$env:ARCA_CURSEFORGE_PROXY_URL = "https://<publisher-worker>.workers.dev/v1"
+npm run tauri build
+```
+
+On Windows, Tauri writes the generated installers under `src-tauri\target\release\bundle\`. Look in the `nsis` and `msi` subfolders for the `.exe` and `.msi` packages.
+
+Useful checks:
+
+```powershell
+npm run build
+cargo check --manifest-path src-tauri\Cargo.toml
+cargo test --manifest-path src-tauri\Cargo.toml
+node --test services\curseforge-proxy\src\index.test.js
+```
+
+## Publisher integration setup
+
+These steps are for the launcher publisher or developers building a configured release. **End users do not need to enter credentials.** Do not commit secrets or send them in chat.
+
+### Microsoft sign-in
+
+Microsoft device-code sign-in requires a registered public-client application:
+
+1. In the [Microsoft Entra admin center](https://entra.microsoft.com/), create an app registration. Choose **Personal Microsoft accounts only** for the launcher's current `/consumers` sign-in endpoint.
+2. In **Authentication**, enable **Allow public client flows**. Add **Mobile and desktop applications** if the portal requires a platform configuration. Device-code flow does not use a redirect URI.
+3. Do not create or distribute a client secret. Copy the **Application (client) ID** and provide it to the build as `ARCA_MICROSOFT_CLIENT_ID`.
+
+Microsoft's [device-code flow documentation](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code) describes the public-client requirements.
+
+### CurseForge integration
+
+CurseForge requires an API key approved for the publisher's use. The key is stored as a secret in the publisher-operated Cloudflare Worker and is never embedded in the launcher.
+
+1. Apply for API access through the [CurseForge for Studios API documentation](https://docs.curseforge.com/). Confirm that the issued key is approved and active.
+2. Install Wrangler and authenticate to the publisher's Cloudflare account:
+
+   ```powershell
+   npx wrangler@latest login
+   ```
+
+3. From the repository root, move to the Worker directory, save the key as a Worker secret, and deploy:
+
+   ```powershell
+   Set-Location services\curseforge-proxy
+   npx wrangler@latest secret put CURSEFORGE_API_KEY
+   npx wrangler@latest deploy
+   ```
+
+   Enter the API key only at Wrangler's hidden prompt. Never paste it into the launcher, source files, or a public repository.
+
+4. Set `ARCA_CURSEFORGE_PROXY_URL` to the deployed Worker URL, optionally ending it with `/v1`. For example:
+
+   ```powershell
+   $env:ARCA_CURSEFORGE_PROXY_URL = "https://<worker>.<account>.workers.dev/v1"
+   ```
+
+5. Protect the public Worker endpoint with Cloudflare rate limiting and monitor usage and the CurseForge API quota. The allowlist limits which CurseForge API routes the Worker forwards, but the Worker URL itself is public.
+
+When the Worker secret changes, redeploying the app is not required. If the Microsoft client ID or proxy URL changes, restart development/build with the updated environment variables.
+
+## Custom themes
+
+Built-in themes are in `assets/themes/`. To add a local theme, create a `.css` file in `launcher/themes/` beside the launcher's `launcher/config` folder, then select **Reload themes** in Settings. Optional theme metadata can be placed in a CSS comment:
 
 ```css
 /*
@@ -67,54 +198,15 @@ Author: Your Name
 }
 ```
 
-Custom themes are CSS only; HTML and JavaScript are not supported. To keep themes local and prevent external resource loads, `@import`, CSS `url(...)`, and `image-set(...)` are blocked, as are CSS escape sequences; files larger than 256 KB are skipped. A theme can still override layout styles, so choose **Default** in Settings if a custom theme makes the interface difficult to use.
+Themes support CSS only. `@import`, CSS `url(...)`, `image-set(...)`, and CSS escape sequences are blocked; themes larger than 256 KB are skipped. A theme can still change the layout, so switch back to **Default** in Settings if a custom theme makes the launcher hard to use.
 
-Built With
+## Support
 
-- "Tauri" (https://tauri.app/)
-- "Vite" (https://vite.dev/)
-- "Rust" (https://www.rust-lang.org/)
-- "TypeScript" (https://www.typescriptlang.org/)
-
-Arca-Launcher is also my first application developed using this technology stack.
-
-Installation
-
-1. Go to the "Releases" page.
-2. Download the latest Arca-Launcher installer for your system.
-3. Run the installer and follow the on-screen instructions.
-4. Launch Arca-Launcher and enjoy!
-
-Requirements
-
-- WebView2 Runtime — Required to run Arca-Launcher on Windows.
-
-If WebView2 Runtime is not installed on your system, download and install it from the official Microsoft website:
-
-"Download Microsoft Edge WebView2 Runtime" (https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
-
-Notes
-
-- Make sure to download the correct installer from the Releases page.
-- If the application fails to start, ensure that WebView2 Runtime is installed and up to date.
-- Arca-Launcher is still in early development, so bugs and unexpected behavior may occur.
-
-Bug Reports
-
-Found a bug or have a suggestion? Feel free to report it through the project's "Issues" page.
-
-Please include relevant details, steps to reproduce the problem, and error logs when possible. Never share passwords or authentication tokens.
-
-Development Status
-
-Arca-Launcher is an independent project currently in early development. Features, design, and functionality may change as the project evolves.
-
-Thank you for checking out Arca-Launcher!
+Report bugs or request features through the repository's [Issues](https://github.com/wristkyion/Arca-Launcher/issues). Include your operating system, what you were doing, and the exact error text. Redact usernames, file paths, authentication codes, passwords, access tokens, and API keys from logs or screenshots.
 
 ---
 
 <p align="center">
-  <strong>Arca-Launcher</strong>
-  <br />
+  <strong>Arca Launcher</strong><br />
   <em>Made independently, built one step at a time.</em>
 </p>
