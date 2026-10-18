@@ -30,9 +30,10 @@
   --purple: #7c3aed; --green: #6cc51f; --text: #ecebf2; --mute: #8d8a9c;
   font-family: "SF Pro Display", "Segoe UI", system-ui, sans-serif;
 }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
 body { margin: 0; background: radial-gradient(1200px 600px at 20% -10%, #2a1456 0%, transparent 60%), var(--bg); color: var(--text); overflow: hidden; }
 button { font: inherit; color: inherit; cursor: pointer; border: 0; }
+input, textarea, select, .log, .crashlog { user-select: text; -webkit-user-select: text; }
 input { font: inherit; }
 
 .shell { height: var(--shell-height, 100vh); padding: 16px; display: flex; flex-direction: column; gap: 14px; }
@@ -317,8 +318,11 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .dlfstatus.error { color: #f87171; }
 .pbar.slim { height: 4px; margin-top: 2px; }
 .dlfpct { font-size: 11px; color: var(--mute); flex-shrink: 0; }
-.dlfx { font-size: 12px; color: var(--mute); flex-shrink: 0; }
-.dlfx:hover { color: #fff; }
+.dlfx { width: 28px; height: 28px; display: grid; place-items: center; flex: 0 0 28px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--mute); font-size: 15px; line-height: 1; }
+.dlfx:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.dlfx:active { background: rgba(255,255,255,.14); }
+.dlfx:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.dlfretry { flex-shrink: 0; padding: 6px 9px; font-size: 10px; }
 
 /* ---- version channel badges & dependency list (mods page) ---- */
 .chpill { font-size: 10px; font-weight: 600; padding: 3px 9px; border-radius: 999px; flex-shrink: 0; align-self: flex-start; }
@@ -591,8 +595,10 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .dlfstatus.error { color: #f87171; }
 .pbar.slim { height: 4px; margin-top: 2px; }
 .dlfpct { font-size: 11px; color: var(--mute); flex-shrink: 0; }
-.dlfx { font-size: 12px; color: var(--mute); flex-shrink: 0; }
-.dlfx:hover { color: #fff; }
+.dlfx { width: 28px; height: 28px; display: grid; place-items: center; flex: 0 0 28px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--mute); font-size: 15px; line-height: 1; }
+.dlfx:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.dlfx:active { background: rgba(255,255,255,.14); }
+.dlfx:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 
 /* ---- version channel badges & dependency list (mods page) ---- */
 .chpill { font-size: 10px; font-weight: 600; padding: 3px 9px; border-radius: 999px; flex-shrink: 0; align-self: flex-start; }
@@ -662,6 +668,9 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .verpicker > .seg:first-of-type { margin-top: 16px; }
 .verpicker > p.hint { margin-top: 2px; }
 .verpicker > .btnrow { margin-top: 4px; margin-bottom: 16px; }
+.picker-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 18px; }
+.picker-filters label { display: flex; flex-direction: column; gap: 5px; margin: 0; font-size: 10px; }
+.picker-filters select { min-width: 0; padding: 8px 9px; font-size: 11px; }
 .verpicker .vlist.verpick { margin: 10px 18px 0; padding-right: 6px; max-height: 320px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .vprow { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel2); border: 1px solid transparent; text-align: left; flex-shrink: 0; }
 .vprow:hover { border-color: var(--purple); }
@@ -669,6 +678,16 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .vprowinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .vprowinfo b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vprowinfo span { font-size: 11px; color: var(--mute); }
+.vprow-meta { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.vprow-meta .vprow-mc { font-size: 10px; }
+.vprow-meta .vloader-tag { padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,.08); color: var(--text); font-size: 9px; line-height: 1.25; }
+.vprow-meta .vloader-tag.forge { background: rgba(245,158,11,.16); color: #fbbf24; }
+.vprow-meta .vloader-tag.fabric { background: rgba(108,197,31,.15); color: #a7e68a; }
+.vprow-meta .vloader-tag.quilt { background: rgba(56,189,248,.15); color: #7dd3fc; }
+.vprow-meta .vloader-tag.neoforge { background: rgba(248,113,113,.15); color: #fca5a5; }
+.vprow-meta .vloader-tag.unknown { color: var(--mute); }
+.picker-target { margin: 0 18px; color: var(--mute); font-size: 11px; }
+.picker-target b { color: var(--text); }
 .vprowch { font-size: 10px; color: var(--mute); flex-shrink: 0; }
 .vprow.release .vprowch { color: var(--green); }
 .vprow.beta .vprowch { color: #f59e0b; }
@@ -676,6 +695,7 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .vprowcheck { color: var(--purple); font-weight: 700; flex-shrink: 0; }
 .verpicker .loadmore { margin: 10px 18px 16px; align-self: stretch; text-align: center; }
 .verpicker .dl { padding: 28px 18px 20px; }
+@media (max-width: 480px) { .picker-filters { grid-template-columns: 1fr; } }
 
 .ui-icon { display: block; width: 20px; height: 20px; flex-shrink: 0; filter: brightness(0) invert(1); }
 .setting-icon .ui-icon { width: 18px; height: 18px; }
@@ -1333,3 +1353,13 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 }
 
 .is-hidden { visibility: hidden; }
+
+.splash-window { width: 100vw; height: 100vh; display: flex; flex-direction: column; padding: 16px 18px 14px; background: #0d0c13; color: var(--text); user-select: none; }
+.splash-top { min-width: 0; }
+.splash-brand { color: var(--mute); font-size: 9px; font-weight: 700; }
+.splash-loading-label { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 13px; font-size: 11px; line-height: 1.25; }
+.splash-loading-label span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.splash-loading-label span:last-child { flex: 0 0 auto; color: var(--mute); font-size: 10px; }
+.splash-progress { width: 100%; height: 40px; flex: 0 0 9px; margin-top: auto; overflow: hidden; border-radius: 999px; background: var(--panel2); }
+.splash-progress span { display: block; width: var(--progress-width); height: 100%; border-radius: inherit; background: var(--green); transition: width .25s ease; }
+.splash-offline { margin: 10px 0 0; color: #fbbf24; font-size: 9px; line-height: 1.3; }

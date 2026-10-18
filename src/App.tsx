@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import ModsPage from "./mods";
 import ContentPage from "./content";
@@ -21,9 +22,9 @@ type ThemeStylesheet = { id: string; name: string; author: string; css: string }
 type LauncherUpdateCheck = { current_version: string; latest_version: string; update_available: boolean };
 type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 const BUILTIN_THEMES: ThemeInfo[] = [
-  { id: "builtin:default", name: "Default", author: "Arca Launcher", builtin: true },
-  { id: "builtin:minimal", name: "Minimal", author: "Arca Launcher", builtin: true },
-  { id: "builtin:minecraft", name: "Minecraft style", author: "Arca Launcher", builtin: true },
+  { id: "builtin:default", name: "Default", author: "Built-in", builtin: true },
+  { id: "builtin:minimal", name: "Minimal", author: "Built-in", builtin: true },
+  { id: "builtin:minecraft", name: "Minecraft style", author: "Built-in", builtin: true },
 ];
 const DEFAULT_THEME_ID = "builtin:default";
 const normalizeThemeId = (value: unknown) => {
@@ -309,7 +310,14 @@ function InstIcon({ inst, size }: { inst: { loader: string; icon?: string }; siz
 }
 
 function AppInner() {
-  const { configureDownloads } = useDownloads();
+  const isSplashWindow = (() => {
+    try {
+      return getCurrentWindow().label === "splash";
+    } catch {
+      return new URLSearchParams(window.location.search).get("window") === "splash";
+    }
+  })();
+  const { configureDownloads, installInstance } = useDownloads();
   const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [page, setPageNow] = useState<Page>("play");
   const [fade, setFade] = useState<"in" | "out">("in");
@@ -331,6 +339,14 @@ function AppInner() {
   const [firstRunStep, setFirstRunStep] = useState(0);
   const [firstRunBusy, setFirstRunBusy] = useState(false);
   const [firstRunError, setFirstRunError] = useState("");
+  const [accountsReady, setAccountsReady] = useState(false);
+  const [instancesReady, setInstancesReady] = useState(false);
+  const [versionsReady, setVersionsReady] = useState(false);
+  const [updateCheckComplete, setUpdateCheckComplete] = useState(false);
+  const [bootMinimumElapsed, setBootMinimumElapsed] = useState(false);
+  const [bootTimedOut, setBootTimedOut] = useState(false);
+  const [splashHandoffComplete, setSplashHandoffComplete] = useState(false);
+  const mainWindowRestored = useRef(false);
 
   // accounts
   const [accounts, setAccounts] = useState<Acc[]>([]);
@@ -367,7 +383,6 @@ function AppInner() {
   const [showLauncherBackgrounds, setShowLauncherBackgrounds] = useState(false);
   const [backgroundPickerError, setBackgroundPickerError] = useState("");
   const [backgroundPickerTarget, setBackgroundPickerTarget] = useState<"new" | "edit">("new");
-  const [createErr, setCreateErr] = useState("");
   const nameEdited = useRef(false);
 
   // managing instances
@@ -406,6 +421,7 @@ function AppInner() {
 
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  const [activityLog, setActivityLog] = useState<string[]>([]);
   const [msCode, setMsCode] = useState<{ code: string; url: string } | null>(null);
   const [skinFail, setSkinFail] = useState(false);
   const [skins, setSkins] = useState<Record<string, Skin>>({});
@@ -414,17 +430,21 @@ function AppInner() {
   const [winH, setWinH] = useState(window.innerHeight);
 
   const add = (s: string) =>
-    setLog((l) => {
+    setActivityLog((l) => {
       const prog = /^(Assets|Libraries) \d+\/\d+/;
       const last = l[l.length - 1];
       if (prog.test(s) && last && prog.test(last)) return [...l.slice(0, -1), s];
       return [...l.slice(-400), s];
     });
+  const addGameLog = (line: string) => setLog((lines) => [...lines.slice(-400), line]);
 
   const applyList = (r: AccList) => { setAccounts(r.accounts); setSelected(r.selected); setSkinFail(false); };
 
   const loadVersions = () =>
-    invoke<VersionInfo[]>("mc_versions").then(setVinfo).catch((e) => add(`Could not load versions: ${e}`));
+    invoke<VersionInfo[]>("mc_versions")
+      .then(setVinfo)
+      .catch((e) => add(`Could not load versions: ${e}`))
+      .finally(() => setVersionsReady(true));
 
   const checkLauncherUpdate = async () => {
     setUpdateCheckBusy(true);
@@ -436,8 +456,21 @@ function AppInner() {
       setUpdateCheckError(`Could not check for launcher updates: ${error}`);
     } finally {
       setUpdateCheckBusy(false);
+      setUpdateCheckComplete(true);
     }
   };
+
+  useEffect(() => {
+    const minimum = setTimeout(() => setBootMinimumElapsed(true), 900);
+    const maximum = setTimeout(() => setBootTimedOut(true), 12000);
+    return () => { clearTimeout(minimum); clearTimeout(maximum); };
+  }, []);
+
+  useEffect(() => {
+    const preventContextMenu = (event: MouseEvent) => event.preventDefault();
+    document.addEventListener("contextmenu", preventContextMenu);
+    return () => document.removeEventListener("contextmenu", preventContextMenu);
+  }, []);
 
   useEffect(() => {
     const updateNetworkStatus = () => setNetworkOnline(navigator.onLine);
@@ -478,17 +511,18 @@ function AppInner() {
 
     invoke<AccList>("list_accounts").then(applyList).catch((e) => {
       add(`Could not load accounts: ${e}`);
-    });
+    }).finally(() => setAccountsReady(true));
     invoke<Instance[]>("list_instances").then((l) => {
       setInstances(l);
       setInstId((cur) => (l.some((i) => i.id === cur) ? cur : l[0]?.id ?? ""));
     }).catch((e) => {
       add(`Could not load instances: ${e}`);
-    });
+    }).finally(() => setInstancesReady(true));
     loadVersions();
     invoke<number>("system_ram").then(setSysRam).catch(() => {});
     const subs = [
       listen<string>("progress", (e) => add(e.payload)),
+      listen<string>("game-log", (e) => addGameLog(e.payload)),
       listen<{ code: string; url: string }>("ms-code", (e) => setMsCode(e.payload)),
     ];
     return () => { subs.forEach((p) => p.then((un) => un())); };
@@ -567,8 +601,6 @@ function AppInner() {
     window.addEventListener("resize", f);
     return () => window.removeEventListener("resize", f);
   }, []);
-  useEffect(() => { (document.body.style as any).zoom = String(st.uiScale / 100); }, [st.uiScale]);
-
   // which loaders exist for the version picked in the wizard
   useEffect(() => {
     if (!wMc) return;
@@ -638,14 +670,35 @@ function AppInner() {
 
   // progress of the current download (looks back to the last "start" line)
   const progress = useMemo(() => {
-    for (let i = log.length - 1; i >= 0; i--) {
-      if (log[i] === "Creating instance..." || log[i] === "Logging in...") break;
-      const m = log[i].match(/^(Assets|Libraries) (\d+)\/(\d+)/);
+    for (let i = activityLog.length - 1; i >= 0; i--) {
+      if (activityLog[i] === "Creating instance..." || activityLog[i] === "Logging in...") break;
+      const m = activityLog[i].match(/^(Assets|Libraries) (\d+)\/(\d+)/);
       if (m) return { label: m[1], pct: Math.round((+m[2] / +m[3]) * 100) };
     }
     return null;
-  }, [log]);
-  const status = log[log.length - 1] ?? "Ready";
+  }, [activityLog]);
+  const status = activityLog[activityLog.length - 1] ?? "Ready";
+  const startupChecks = [
+    { label: "Launcher settings", ready: settingsLoaded },
+    { label: "Accounts and instances", ready: accountsReady && instancesReady },
+    { label: "Minecraft version catalog", ready: versionsReady },
+    { label: "Themes", ready: themesReady },
+    { label: "Launcher update check", ready: updateCheckComplete },
+  ];
+  const completedStartupChecks = startupChecks.filter((check) => check.ready).length;
+  const activeStartupCheck = startupChecks.find((check) => !check.ready);
+  const startupReady = (completedStartupChecks === startupChecks.length && bootMinimumElapsed) || bootTimedOut;
+  useEffect(() => {
+    (document.body.style as any).zoom = String(isSplashWindow ? 1 : st.uiScale / 100);
+  }, [st.uiScale, isSplashWindow]);
+
+  useEffect(() => {
+    if (!isSplashWindow || !startupReady || mainWindowRestored.current) return;
+    mainWindowRestored.current = true;
+    invoke("finish_startup")
+      .catch((error) => add(`Could not restore the launcher window size: ${error}`))
+      .finally(() => setSplashHandoffComplete(true));
+  }, [isSplashWindow, startupReady]);
 
   const play = async () => {
     if (!inst) return;
@@ -800,27 +853,26 @@ function AppInner() {
   // ---- instances ----
   const resetWizard = () => {
     setStep(1); setWMc(""); setWLoader("vanilla"); setSupport(null);
-    setWName(""); setWIcon(""); setWDesc(""); setWBg(""); setCreateErr(""); nameEdited.current = false;
+    setWName(""); setWIcon(""); setWDesc(""); setWBg(""); nameEdited.current = false;
     setBackgroundPickerOpen(false); setShowLauncherBackgrounds(false); setBackgroundPickerError("");
     setBackgroundPickerTarget("new");
     setVersionPage(1);
   };
   const newInstance = () => { resetWizard(); setTab("download"); setPage("versions"); };
 
-  const createInstance = async () => {
-    setCreateErr("");
-    setStep(4);
-    try {
-      const list = await invoke<Instance[]>("create_instance", {
-        req: { name: wName, loader: wLoader, mc: wMc, java: java || "java", java_mode: st.javaRuntime, icon: wIcon, description: wDesc, background: wBg },
-      });
-      setInstances(list);
-      setInstId(list[list.length - 1].id);
-      setStep(5);
-    } catch (e) {
-      setCreateErr(String(e));
-      setStep(3);
-    }
+  const enqueueInstance = () => {
+    const name = wName.trim();
+    if (!name || !wMc) return;
+    installInstance({
+      name, loader: wLoader, mc: wMc, icon: wIcon || LOADER_ICONS[wLoader],
+      description: wDesc, background: wBg, java: java || "java", javaMode: st.javaRuntime,
+      onInstalled: (list) => {
+        const created = list[list.length - 1];
+        setInstances(list);
+        if (created) setInstId(created.id);
+      },
+    });
+    resetWizard();
   };
 
   const startEdit = async (i: Instance) => {
@@ -975,6 +1027,23 @@ function AppInner() {
   const nav: [Page, string, string][] = [
     ["play", "play", "Home"], ["account", "user", "Accounts"], ["versions", "grid", "Instance"], ["mods", "puzzle", "Downloader"], ["console", "term", "Console"],
   ];
+
+  if (isSplashWindow) {
+    const progressPct = Math.round((completedStartupChecks / startupChecks.length) * 100);
+    return (
+      <main className="splash-window" role="status" aria-live="polite">
+        <div className="splash-top">
+          <span className="splash-brand">ARCA LAUNCHER</span>
+          <div className="splash-loading-label">
+            <span>{splashHandoffComplete ? "Opening launcher" : activeStartupCheck?.label ?? "Starting launcher"}</span>
+            <span>{progressPct}%</span>
+          </div>
+        </div>
+        {!networkOnline && <p className="splash-offline">Offline right now. Online features may be unavailable.</p>}
+        <div className="splash-progress"><span style={{ "--progress-width": `${progressPct}%` } as CSSVars} /></div>
+      </main>
+    );
+  }
 
   return (
     <div className="shell" style={{ "--shell-height": `${winH / (st.uiScale / 100)}px` } as CSSVars}>
@@ -1325,8 +1394,8 @@ function AppInner() {
 
               {tab === "download" && (<>
                 <div className="steps">
-                  {["Version", "Loader", "Name", "Download"].map((s, i) => (
-                    <span key={s} className={"stp" + (step === i + 1 || (step === 5 && i === 3) ? " on" : "") + (step > i + 1 ? " done" : "")}>{i + 1}. {s}</span>
+                  {["Version", "Loader", "Name"].map((s, i) => (
+                    <span key={s} className={"stp" + (step === i + 1 ? " on" : "") + (step > i + 1 ? " done" : "")}>{i + 1}. {s}</span>
                   ))}
                 </div>
 
@@ -1397,33 +1466,11 @@ function AppInner() {
                     }}>Choose background...</button>
                   </div>
                   <p className="hint">Minecraft {wMc} · {cap(wLoader)}</p>
-                  {createErr && <div className="err">{createErr}</div>}
                   <div className="btnrow">
                     <button className="mini" onClick={() => setStep(2)}>← Back</button>
-                    <button className="btn purple addbtn" disabled={!wName.trim()} onClick={createInstance}>Create and download</button>
+                    <button className="btn purple addbtn" disabled={!wName.trim()} onClick={enqueueInstance}>Create and install</button>
                   </div>
                 </>)}
-
-                {step === 4 && (
-                  <div className="dl">
-                    <InstIcon inst={{ loader: wLoader, icon: wIcon }} size={64} />
-                    <h3>Downloading {wName}...</h3>
-                    <p className="hint">{status}</p>
-                    <div className="pbar"><span style={{ "--progress-width": `${progress ? progress.pct : 5}%` } as CSSVars} /></div>
-                    <p className="hint">{progress ? `${progress.label} ${progress.pct}%` : "Preparing..."}</p>
-                  </div>
-                )}
-
-                {step === 5 && (
-                  <div className="dl">
-                    <InstIcon inst={{ loader: wLoader, icon: wIcon }} size={64} />
-                    <h3>{wName} is ready</h3>
-                    <div className="btnrow">
-                      <button className="btn purple addbtn" onClick={() => setPage("play")}>Go to home</button>
-                      <button className="mini" onClick={resetWizard}>Download another</button>
-                    </div>
-                  </div>
-                )}
                 </div>
               </>)}
 
@@ -1473,17 +1520,17 @@ function AppInner() {
             <section className="panel full console-page">
               <header className="page-heading">
                 <div><span className="eyebrow">LIVE OUTPUT</span><h2>Console</h2>
-                  <p>Launcher activity, downloads, and game launch diagnostics.</p></div>
+                  <p>Minecraft output from the current game session.</p></div>
                 <div className="console-heading-actions">
                   <span className="count-chip">{log.length} {log.length === 1 ? "entry" : "entries"}</span>
                   <button className="mini" onClick={() => setLog([])} disabled={log.length === 0}>Clear log</button>
                 </div>
               </header>
               <div className="console-toolbar"><span className={"console-indicator" + (busy ? " active" : "")} />
-                <b>{busy ? "Operation in progress" : status}</b><span className="console-session">SESSION OUTPUT</span></div>
-              <div className="log" ref={logRef} role="log" aria-live="polite" aria-label="Launcher console output">
+                <b>Minecraft process output</b><span className="console-session">GAME LOG</span></div>
+              <div className="log" ref={logRef} role="log" aria-live="polite" aria-label="Minecraft process output">
                 {log.length === 0
-                  ? <div className="console-empty"><span>›_</span><b>All quiet for now</b><p>Launcher activity will appear here.</p></div>
+                  ? <div className="console-empty"><span>›_</span><b>No game output yet</b><p>Minecraft process logs will appear here.</p></div>
                   : log.map((l, i) => <div key={i} className={"log-line" + (/error|failed|could not/i.test(l) ? " error" : "")}>
                     <span className="log-index">{String(i + 1).padStart(3, "0")}</span><span>{l}</span>
                   </div>)}
@@ -1603,7 +1650,7 @@ function AppInner() {
                           <option key={theme.id} value={theme.id}>{theme.name} — {theme.author}</option>
                         ))}
                       </select>
-                      <p className="setting-note">Custom CSS themes go in <code>launcher/themes</code>. External imports and URLs are blocked.</p>
+                      <p className="setting-note">Custom CSS themes go in <code>launcher/themes</code>. Remote imports and assets are supported; use themes you trust.</p>
                       <button className="mini" onClick={() => {
                         invoke<ThemeCatalog>("list_themes")
                           .then((catalog) => {

@@ -1,7 +1,8 @@
-use crate::{auth::Account, emit};
+use crate::{auth::Account, emit, emit_game_log};
 use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
 use serde_json::Value;
+use sha1::{Digest, Sha1};
 use std::collections::VecDeque;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -55,28 +56,89 @@ async fn fetch_bytes(c: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
 }
 
 pub async fn download(c: &reqwest::Client, url: &str, path: &Path) -> Result<()> {
-    if path.exists() {
+    download_checked(c, url, path, None, 5).await
+}
+
+async fn download_checked(
+    c: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    expected_sha1: Option<&str>,
+    attempts: u64,
+) -> Result<()> {
+    let is_valid = |candidate: &Path| {
+        if !candidate.is_file() {
+            return false;
+        }
+        expected_sha1.is_none_or(|expected| {
+            sha1_file(candidate).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+        })
+    };
+    if is_valid(path) {
         return Ok(());
+    }
+    if path.exists() {
+        fs::remove_file(path)?;
     }
     if let Some(p) = path.parent() {
         fs::create_dir_all(p)?;
     }
     let mut last_err = None;
-    for attempt in 0..5u64 {
+    for attempt in 0..attempts {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
         }
         match fetch_bytes(c, url).await {
             Ok(b) => {
-                let tmp = path.with_extension("part");
-                fs::write(&tmp, &b)?;
-                fs::rename(tmp, path)?;
-                return Ok(());
+                if let Some(expected) = expected_sha1 {
+                    let actual = format!("{:x}", Sha1::digest(&b));
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        last_err = Some(anyhow!(
+                            "SHA-1 mismatch for {url}: expected {expected}, got {actual}"
+                        ));
+                        continue;
+                    }
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("download");
+                let tmp =
+                    path.with_file_name(format!("{name}.{}.part", uuid::Uuid::new_v4().simple()));
+                if let Err(error) = fs::write(&tmp, &b) {
+                    last_err = Some(error.into());
+                    continue;
+                }
+                match fs::rename(&tmp, path) {
+                    Ok(()) => return Ok(()),
+                    Err(_error) if is_valid(path) => {
+                        let _ = fs::remove_file(tmp);
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(tmp);
+                        last_err = Some(error.into());
+                    }
+                }
             }
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap())
+    Err(last_err.unwrap_or_else(|| anyhow!("Download failed without an attempt: {url}")))
+}
+
+fn sha1_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha1::new();
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -92,36 +154,34 @@ pub async fn download_logged(
     url: &str,
     path: &Path,
 ) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(p) = path.parent() {
-        fs::create_dir_all(p)?;
-    }
-    let mut last_err = None;
-    for attempt in 0..8u64 {
-        if attempt > 0 {
-            emit(
-                app,
-                format!(
-                    "Retrying {} (attempt {}/8)",
-                    url.rsplit('/').next().unwrap_or(url),
-                    attempt + 1
-                ),
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(400 * attempt)).await;
-        }
-        match fetch_bytes(c, url).await {
-            Ok(b) => {
-                let tmp = path.with_extension("part");
-                fs::write(&tmp, &b)?;
-                fs::rename(tmp, path)?;
-                return Ok(());
+    download_logged_checked(app, c, url, path, None).await
+}
+
+async fn download_logged_checked(
+    app: &AppHandle,
+    c: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    expected_sha1: Option<&str>,
+) -> Result<()> {
+    for attempt in 1..=8u64 {
+        match download_checked(c, url, path, expected_sha1, 1).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 8 => {
+                emit(
+                    app,
+                    format!(
+                        "Retrying {} (attempt {}/8): {error}",
+                        url.rsplit('/').next().unwrap_or(url),
+                        attempt + 1
+                    ),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(400 * attempt)).await;
             }
-            Err(e) => last_err = Some(e),
+            Err(error) => return Err(error),
         }
     }
-    Err(last_err.unwrap())
+    unreachable!()
 }
 
 pub async fn mc_versions() -> Result<Vec<VersionInfo>> {
@@ -172,8 +232,9 @@ pub async fn install_vanilla(
     let url = v["downloads"]["client"]["url"]
         .as_str()
         .ok_or_else(|| anyhow!("No client download for {id}"))?;
+    let sha1 = v["downloads"]["client"]["sha1"].as_str();
     emit(app, "Downloading client jar");
-    download(c, url, &vdir.join(format!("{id}.jar"))).await
+    download_checked(c, url, &vdir.join(format!("{id}.jar")), sha1, 5).await
 }
 
 // ---------------------------------------------------------------- loaders
@@ -551,6 +612,7 @@ fn jar_id(dir: &Path, id: &str) -> Result<String> {
 struct LibFile {
     path: String,
     url: String,
+    sha1: Option<String>,
     native: bool,
 }
 
@@ -574,6 +636,7 @@ fn collect_libs(v: &Value) -> Vec<LibFile> {
                 out.push(LibFile {
                     path: p.into(),
                     url: a["url"].as_str().unwrap_or("").into(),
+                    sha1: a["sha1"].as_str().map(String::from),
                     native: false,
                 });
             }
@@ -590,6 +653,7 @@ fn collect_libs(v: &Value) -> Vec<LibFile> {
                 out.push(LibFile {
                     url: format!("{base}{p}"),
                     path: p,
+                    sha1: None,
                     native: false,
                 });
             }
@@ -601,6 +665,7 @@ fn collect_libs(v: &Value) -> Vec<LibFile> {
                     out.push(LibFile {
                         path: p.into(),
                         url: a["url"].as_str().unwrap_or("").into(),
+                        sha1: a["sha1"].as_str().map(String::from),
                         native: true,
                     });
                 }
@@ -639,21 +704,21 @@ pub async fn install_deps(
     // libraries
     let libs_dir = dir.join("libraries");
     let files = collect_libs(v);
-    let jobs: Vec<(String, PathBuf)> = files
+    let jobs: Vec<(String, PathBuf, Option<String>)> = files
         .iter()
         .filter(|f| !f.url.is_empty())
-        .map(|f| (f.url.clone(), libs_dir.join(&f.path)))
+        .map(|f| (f.url.clone(), libs_dir.join(&f.path), f.sha1.clone()))
         .collect();
     let total = jobs.len();
     emit(app, format!("Downloading {total} libraries"));
     let done = Arc::new(AtomicUsize::new(0));
     let results: Vec<Result<()>> = stream::iter(jobs)
-        .map(|(url, path)| {
+        .map(|(url, path, sha1)| {
             let c = c.clone();
             let done = done.clone();
             let app = app.clone();
             async move {
-                let r = download_logged(&app, &c, &url, &path).await;
+                let r = download_logged_checked(&app, &c, &url, &path, sha1.as_deref()).await;
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % 5 == 0 || n == total {
                     emit(&app, format!("Libraries {n}/{total}"));
@@ -684,7 +749,7 @@ pub async fn install_deps(
         .join("assets")
         .join("indexes")
         .join(format!("{ai_id}.json"));
-    download(c, ai_url, &index_path).await?;
+    download_checked(c, ai_url, &index_path, ai["sha1"].as_str(), 5).await?;
     let index: Value = serde_json::from_str(&fs::read_to_string(&index_path)?)?;
     let objects: Vec<String> = index["objects"]
         .as_object()
@@ -706,7 +771,7 @@ pub async fn install_deps(
             let path = dir.join("assets").join("objects").join(&h[..2]).join(&h);
             let url = format!("https://resources.download.minecraft.net/{}/{}", &h[..2], h);
             async move {
-                let r = download_logged(&app, &c, &url, &path).await;
+                let r = download_logged_checked(&app, &c, &url, &path, Some(&h)).await;
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % 10 == 0 || n == total {
                     emit(&app, format!("Assets {n}/{total}"));
@@ -798,7 +863,9 @@ fn expand_jvm_arg(a: &Value, vars: &HashMap<&str, String>, id: &str, jar_id: &st
 
 #[cfg(test)]
 mod launch_argument_tests {
-    use super::{expand, expand_jvm_arg, forge_installer_urls, legacy_client_version, maven_path};
+    use super::{
+        expand, expand_jvm_arg, forge_installer_urls, legacy_client_version, maven_path, sha1_file,
+    };
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -864,6 +931,17 @@ mod launch_argument_tests {
             "versionInfo": {"id": "forge-example"}
         });
         assert!(legacy_client_version(&profile).unwrap().is_none());
+    }
+
+    #[test]
+    fn downloaded_file_sha1_matches_mojang_checksum_format() {
+        let path = std::env::temp_dir().join(format!("arca-sha1-{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha1_file(&path).unwrap(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -1020,7 +1098,7 @@ pub fn launch(
         let buf = log_buf.clone();
         std::thread::spawn(move || {
             for l in BufReader::new(out).lines().flatten() {
-                emit(&app, l.clone());
+                emit_game_log(&app, l.clone());
                 let mut b = buf.lock().unwrap();
                 if b.len() >= 200 {
                     b.pop_front();
@@ -1034,7 +1112,7 @@ pub fn launch(
         let buf = log_buf.clone();
         std::thread::spawn(move || {
             for l in BufReader::new(err).lines().flatten() {
-                emit(&app, l.clone());
+                emit_game_log(&app, l.clone());
                 let mut b = buf.lock().unwrap();
                 if b.len() >= 200 {
                     b.pop_front();
@@ -1079,6 +1157,27 @@ pub fn launch(
             }
         }
     });
+
+    match o.hide.as_str() {
+        "hide" => {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.hide() {
+                    emit(&app, format!("Could not hide the launcher window: {error}"));
+                }
+            }
+        }
+        "close" => {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.close() {
+                    emit(
+                        &app,
+                        format!("Could not close the launcher window: {error}"),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 

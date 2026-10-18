@@ -13,7 +13,10 @@ use base64::Engine;
 use instances::Instance;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
+    future::Future,
     io::Cursor,
     path::{Path, PathBuf},
     process::Command,
@@ -21,10 +24,32 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 
 pub fn emit(app: &AppHandle, msg: impl Into<String>) {
-    let _ = app.emit("progress", msg.into());
+    let message = msg.into();
+    let _ = app.emit("progress", message.clone());
+    let _ = INSTALL_TASK_ID.try_with(|task_id| {
+        let _ = app.emit(
+            "install-progress",
+            serde_json::json!({ "taskId": task_id, "message": message }),
+        );
+    });
 }
 
-const MAX_THEME_SIZE: u64 = 256 * 1024;
+tokio::task_local! {
+    static INSTALL_TASK_ID: String;
+}
+
+pub async fn with_install_task<F: Future>(task_id: String, future: F) -> F::Output {
+    if task_id.trim().is_empty() {
+        future.await
+    } else {
+        INSTALL_TASK_ID.scope(task_id, future).await
+    }
+}
+
+pub fn emit_game_log(app: &AppHandle, msg: impl Into<String>) {
+    let _ = app.emit("game-log", msg.into());
+}
+
 const MICROSOFT_CLIENT_ID: Option<&str> = option_env!("ARCA_MICROSOFT_CLIENT_ID");
 
 fn microsoft_client_id() -> anyhow::Result<&'static str> {
@@ -69,7 +94,7 @@ fn builtin_theme(id: &str) -> Option<ThemeStylesheet> {
     Some(ThemeStylesheet {
         id: id.to_string(),
         name: name.to_string(),
-        author: "Arca Launcher".to_string(),
+        author: "Built-in".to_string(),
         css: css.to_string(),
     })
 }
@@ -143,28 +168,27 @@ fn strip_css_comments(css: &str) -> String {
     output
 }
 
+fn contains_css_property(css: &str, property: &str) -> bool {
+    css.split(['{', ';']).any(|declaration| {
+        declaration
+            .split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(property))
+    })
+}
+
 fn validate_theme_css(css: &str) -> Result<(), String> {
-    if css.len() as u64 > MAX_THEME_SIZE {
-        return Err("Theme CSS is larger than 256 KB".to_string());
-    }
     let css = strip_css_comments(css);
     if css.contains('\\') {
         return Err("CSS escape sequences are not supported in custom themes".to_string());
     }
     let lower = css.to_ascii_lowercase();
-    for blocked in [
-        "@import",
-        "url(",
-        "image-set(",
-        "-webkit-image-set(",
-        "expression(",
-        "javascript:",
-        "behavior:",
-        "-moz-binding",
-    ] {
+    for blocked in ["expression(", "javascript:", "-moz-binding"] {
         if lower.contains(blocked) {
             return Err(format!("Theme CSS may not contain {blocked}"));
         }
+    }
+    if contains_css_property(&lower, "behavior") {
+        return Err("Theme CSS may not use the legacy behavior property".to_string());
     }
     Ok(())
 }
@@ -207,7 +231,7 @@ fn list_themes() -> Result<ThemeCatalog, String> {
     .map(|(id, name)| ThemeInfo {
         id: id.to_string(),
         name: name.to_string(),
-        author: "Arca Launcher".to_string(),
+        author: "Built-in".to_string(),
         builtin: true,
     })
     .collect::<Vec<_>>();
@@ -258,17 +282,6 @@ fn list_themes() -> Result<ThemeCatalog, String> {
                 continue;
             }
         };
-        let size = match canonical_path.metadata() {
-            Ok(metadata) => metadata.len(),
-            Err(error) => {
-                warnings.push(format!("Could not read {stem}.css metadata: {error}"));
-                continue;
-            }
-        };
-        if size > MAX_THEME_SIZE {
-            warnings.push(format!("{stem}.css is larger than 256 KB and was skipped"));
-            continue;
-        }
         let css = match std::fs::read_to_string(&canonical_path) {
             Ok(css) => css,
             Err(error) => {
@@ -350,13 +363,15 @@ fn window_size_path() -> PathBuf {
 
 fn restore_window_size(window: &tauri::WebviewWindow) -> Result<(), String> {
     let path = window_size_path();
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    let size = match std::fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str::<WindowSize>(&contents)
+            .map_err(|error| format!("Could not parse saved window size: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => WindowSize {
+            width: 920,
+            height: 590,
+        },
         Err(error) => return Err(format!("Could not read saved window size: {error}")),
     };
-    let size: WindowSize = serde_json::from_str(&contents)
-        .map_err(|error| format!("Could not parse saved window size: {error}"))?;
     if size.width < 640 || size.height < 400 {
         return Err("Saved window size is smaller than the supported minimum".into());
     }
@@ -391,12 +406,30 @@ fn save_window_size(window: &tauri::Window) -> Result<(), String> {
         height: logical_size.height.round() as u32,
     };
     if size.width < 640 || size.height < 400 {
-        return Err("Current window size is smaller than the supported minimum".into());
+        return Ok(());
     }
     let path = window_size_path();
     let contents = serde_json::to_string(&size)
         .map_err(|error| format!("Could not serialize window size: {error}"))?;
     std::fs::write(path, contents).map_err(|error| format!("Could not save window size: {error}"))
+}
+
+#[tauri::command]
+fn finish_startup(app: AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window is not available".to_string())?;
+    restore_window_size(&main)?;
+    main.maximize()
+        .map_err(|error| format!("Could not maximize main window: {error}"))?;
+    main.show()
+        .map_err(|error| format!("Could not show main window: {error}"))?;
+    main.set_focus()
+        .map_err(|error| format!("Could not focus main window: {error}"))?;
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.close();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -715,7 +748,10 @@ fn parse_java_major(text: &str) -> anyhow::Result<u8> {
 }
 
 fn detect_java_major(java: &str) -> anyhow::Result<u8> {
-    let output = Command::new(java).arg("-version").output()?;
+    let mut command = Command::new(java);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output = command.arg("-version").output()?;
     if !output.status.success() {
         anyhow::bail!("Java version check exited with {}", output.status);
     }
@@ -1485,11 +1521,16 @@ struct CreateReq {
     icon: String,
     description: String,
     background: String,
+    #[serde(default)]
+    task_id: String,
 }
 
 #[tauri::command]
 async fn create_instance(app: AppHandle, req: CreateReq) -> Result<Vec<Instance>, String> {
-    create(app, req).await.map_err(|e| format!("{e:#}"))
+    let task_id = req.task_id.clone();
+    with_install_task(task_id, create(app, req))
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>> {
@@ -1598,17 +1639,26 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let window = app
+            let main = app
                 .get_webview_window("main")
                 .ok_or("Main window is not available during startup")?;
-            if let Err(error) = restore_window_size(&window) {
+            if let Err(error) = restore_window_size(&main) {
                 eprintln!("{error}");
             }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                if let Err(error) = save_window_size(window) {
+                if window.label() == "splash" {
+                    let main_visible = window
+                        .app_handle()
+                        .get_webview_window("main")
+                        .and_then(|main| main.is_visible().ok())
+                        .unwrap_or(false);
+                    if !main_visible {
+                        window.app_handle().exit(0);
+                    }
+                } else if let Err(error) = save_window_size(window) {
                     eprintln!("{error}");
                 }
             }
@@ -1631,6 +1681,7 @@ fn main() {
             mods::mod_search,
             mods::mod_versions,
             mods::mod_install,
+            mods::cancel_mod_install,
             mods::content_install,
             mods::modpack_install,
             list_content,
@@ -1639,6 +1690,7 @@ fn main() {
             open_instance_folder,
             open_launcher_releases,
             check_launcher_update,
+            finish_startup,
             load_settings,
             save_settings,
             list_themes,
@@ -1671,6 +1723,7 @@ mod theme_tests {
     fn builtin_themes_pass_custom_css_safety_checks() {
         for id in ["builtin:default", "builtin:minimal", "builtin:minecraft"] {
             let theme = builtin_theme(id).expect("theme should be embedded");
+            assert_eq!(theme.author, "Built-in");
             assert!(
                 validate_theme_css(&theme.css).is_ok(),
                 "{} should pass CSS validation",
@@ -1680,9 +1733,19 @@ mod theme_tests {
     }
 
     #[test]
-    fn rejects_external_css_resources_even_when_comments_split_the_token() {
-        assert!(validate_theme_css("a { background: u/**/rl(https://example.com/x); }").is_err());
-        assert!(validate_theme_css("@im/**/port 'https://example.com/theme.css';").is_err());
+    fn allows_external_css_resources_and_large_theme_files() {
+        assert!(validate_theme_css("@import url('https://example.com/theme.css');").is_ok());
+        assert!(
+            validate_theme_css("a { background: url(https://example.com/image.png); }").is_ok()
+        );
+        let large_theme = format!("/*{}*/ :root {{ --bg: #101116; }}", "x".repeat(300 * 1024));
+        assert!(validate_theme_css(&large_theme).is_ok());
+    }
+
+    #[test]
+    fn still_rejects_script_like_css_constructs() {
+        assert!(validate_theme_css("a { behavior: url(evil.htc); }").is_err());
+        assert!(validate_theme_css("a { color: expression(alert(1)); }").is_err());
     }
 }
 

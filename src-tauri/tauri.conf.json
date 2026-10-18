@@ -10,7 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Arca Launcher", "width": 920, "height": 590, "resizable": true, "fullscreen": false, "maximized": false }],
+    "windows": [
+      { "label": "main", "title": "Arca Launcher", "width": 920, "height": 590, "minWidth": 640, "minHeight": 400, "visible": false, "resizable": true, "fullscreen": false, "maximized": false },
+      { "label": "splash", "title": "Arca Launcher", "url": "index.html?window=splash", "width": 300, "height": 100, "minWidth": 300, "minHeight": 100, "center": true, "decorations": false, "resizable": false, "closable": true, "fullscreen": false, "maximized": false }
+    ],
     "security": { "csp": null }
   },
   "bundle": {

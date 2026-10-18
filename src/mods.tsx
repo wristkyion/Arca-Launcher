@@ -8,7 +8,7 @@ type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 export type Inst = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string };
 type Hit = { id: string; title: string; summary: string; icon: string; downloads: number; author: string; url: string };
 type Res = { hits: Hit[]; total: number };
-type VersionHit = { id: string; name: string; channel: string; game_versions: string[]; date: string };
+type VersionHit = { id: string; name: string; channel: string; game_versions: string[]; loaders: string[]; date: string };
 
 type Props = {
   inst: Inst | null;
@@ -40,7 +40,9 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   // version picker
   const [picker, setPicker] = useState<Hit | null>(null);
   const [verMode, setVerMode] = useState<"latest" | "pick">("latest");
-  const [verChannel, setVerChannel] = useState<"all" | "release" | "beta" | "alpha">("release");
+  const [verChannel, setVerChannel] = useState<"all" | "release" | "beta" | "alpha">("all");
+  const [verLoader, setVerLoader] = useState("all");
+  const [verMinecraft, setVerMinecraft] = useState("all");
   const [verList, setVerList] = useState<VersionHit[]>([]);
   const [verLoading, setVerLoading] = useState(false);
   const [verErr, setVerErr] = useState("");
@@ -107,10 +109,16 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   };
 
   const openPicker = (h: Hit) => {
-    setPicker(h); setVerMode("latest"); setVerChannel("release");
+    setPicker(h); setVerMode("latest"); setVerChannel("all");
+    setVerLoader("all"); setVerMinecraft("all");
     setVerList([]); setVerErr(""); setVerChosen(null); setVerShown(25);
   };
   const closePicker = () => setPicker(null);
+  const selectedVersion = verList.find((version) => version.id === verChosen);
+  const compatibleWithInstance = !selectedVersion || kind !== "mod" || !inst || (
+    (!selectedVersion.game_versions.length || selectedVersion.game_versions.includes(inst.mc)) &&
+    (!selectedVersion.loaders.length || selectedVersion.loaders.includes(inst.loader))
+  );
   const confirmInstall = () => {
     if (!picker) return;
     install({
@@ -181,7 +189,7 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
         {hits.map((h) => {
           const key = keyOf(h);
           const t = taskFor(h);
-          const isRunning = t?.phase === "running";
+          const isRunning = t?.phase === "running" || t?.phase === "queued" || t?.phase === "cancelling";
           const isError = t?.phase === "error";
           const files = done[key];
           const isInstalled = !isRunning && !isError && kind !== "modpack" && !!files && files.length > 0;
@@ -275,14 +283,46 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
                 ) : (<>
                   <div className="seg">
                     {(["all", "release", "beta", "alpha"] as const).map((c) => (
-                      <button key={c} className={verChannel === c ? "on" : ""} onClick={() => { setVerChannel(c); setVerShown(25); }}>
+                      <button key={c} className={verChannel === c ? "on" : ""} onClick={() => { setVerChannel(c); setVerShown(25); setVerChosen(null); }}>
                         {c === "all" ? "All" : chLabel(c)}
                       </button>
                     ))}
                   </div>
+                  {kind === "mod" && (
+                    <div className="picker-filters">
+                      <label>Modloader
+                        <select value={verLoader} onChange={(e) => { setVerLoader(e.target.value); setVerShown(25); setVerChosen(null); }}>
+                          <option value="all">All loaders</option>
+                          <option value="forge">Forge</option>
+                          <option value="fabric">Fabric</option>
+                          <option value="quilt">Quilt</option>
+                          <option value="neoforge">NeoForge</option>
+                        </select>
+                      </label>
+                      <label>Minecraft version
+                        <select value={verMinecraft} onChange={(e) => { setVerMinecraft(e.target.value); setVerShown(25); setVerChosen(null); }}>
+                          <option value="all">All versions</option>
+                          {[...new Set(verList.flatMap((version) => version.game_versions))].map((version) => (
+                            <option value={version} key={version}>{version}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  )}
+                  {kind === "mod" && inst && (
+                    <p className="picker-target">Target: <b>{cap(inst.loader)}</b> · Minecraft {inst.mc}</p>
+                  )}
                   {verErr && <div className="err">{verErr}</div>}
+                  {verChosen && !compatibleWithInstance && inst && kind === "mod" && (
+                    <div className="err">This file is not tagged for {cap(inst.loader)} on Minecraft {inst.mc}.</div>
+                  )}
                   {(() => {
-                    const matching = verList.filter((v) => verChannel === "all" || v.channel === verChannel);
+                    const matching = verList.filter((v) => {
+                      const channelMatches = verChannel === "all" || v.channel === verChannel;
+                      const mcMatches = verMinecraft === "all" || v.game_versions.includes(verMinecraft);
+                      const loaderMatches = verLoader === "all" || v.loaders.includes(verLoader);
+                      return channelMatches && mcMatches && loaderMatches;
+                    });
                     const shown = matching.slice(0, verShown);
                     return (
                       <>
@@ -294,14 +334,23 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
                               <span className={"chdot " + v.channel} />
                               <div className="vprowinfo">
                                 <b>{v.name || v.id}</b>
-                                <span>{v.game_versions[0] ? `Minecraft ${v.game_versions[0]}` : "\u00A0"}</span>
+                                <div className="vprow-meta">
+                                  <span className="vprow-mc">{kind === "mod" && inst
+                                    ? `Minecraft ${v.game_versions.length ? v.game_versions.slice(0, 2).join(", ") : "not listed"}${v.game_versions.length > 2 ? ` +${v.game_versions.length - 2}` : ""}`
+                                    : v.game_versions.length
+                                      ? `Minecraft ${v.game_versions.slice(0, 2).join(", ")}${v.game_versions.length > 2 ? ` +${v.game_versions.length - 2}` : ""}`
+                                      : "Minecraft version not listed"}</span>
+                                  {kind === "mod" && (v.loaders.length
+                                    ? v.loaders.map((loader) => <span key={loader} className={`vloader-tag ${loader}`}>{cap(loader)}</span>)
+                                    : <span className="vloader-tag unknown">Loader not listed</span>)}
+                                </div>
                               </div>
                               <span className="vprowch">{chLabel(v.channel)}</span>
                               {v.id === verChosen && <span className="vprowcheck">✓</span>}
                             </button>
                           ))}
                           {!verLoading && !verErr && matching.length === 0 && (
-                            <p className="hint">No versions in this channel.</p>
+                            <p className="hint">No versions match these filters.</p>
                           )}
                         </div>
                         {!verLoading && matching.length > shown.length && (
@@ -316,7 +365,7 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
 
                 <div className="btnrow">
                   <button className="mini" onClick={closePicker}>Cancel</button>
-                  <button className="btn purple addbtn" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst) || (verMode === "pick" && !verChosen)} onClick={confirmInstall}>
+                  <button className="btn purple addbtn" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst) || (verMode === "pick" && (!verChosen || !compatibleWithInstance))} onClick={confirmInstall}>
                     Download
                   </button>
                 </div>

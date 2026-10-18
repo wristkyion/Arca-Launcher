@@ -5,19 +5,47 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex, OnceLock,
     },
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::watch;
 
 const MR: &str = "https://api.modrinth.com/v2";
 const CF: &str = "https://api.curseforge.com/v1";
+
+static ACTIVE_MOD_INSTALLS: OnceLock<Mutex<HashMap<String, watch::Sender<bool>>>> = OnceLock::new();
+
+fn active_mod_installs() -> &'static Mutex<HashMap<String, watch::Sender<bool>>> {
+    ACTIVE_MOD_INSTALLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone)]
+struct ModInstallContext {
+    task_id: String,
+    cancelled: watch::Receiver<bool>,
+    downloaded_files: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl ModInstallContext {
+    fn is_cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+}
+
+async fn wait_for_cancel(mut cancelled: watch::Receiver<bool>) {
+    loop {
+        if *cancelled.borrow() || cancelled.changed().await.is_err() {
+            return;
+        }
+    }
+}
 
 // ------------------------------------------------------------ helpers
 
@@ -346,12 +374,51 @@ async fn cf_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
 
 // ------------------------------------------------------------ browsing a project's versions
 
+fn loader_name(tag: &str) -> Option<&'static str> {
+    match tag.trim().to_ascii_lowercase().as_str() {
+        "forge" => Some("forge"),
+        "fabric" => Some("fabric"),
+        "quilt" => Some("quilt"),
+        "neoforge" => Some("neoforge"),
+        _ => None,
+    }
+}
+
+fn version_loaders(tags: &Value) -> Vec<String> {
+    let mut loaders = Vec::new();
+    for tag in tags
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let Some(loader) = loader_name(tag) else {
+            continue;
+        };
+        if !loaders.iter().any(|existing| existing == loader) {
+            loaders.push(loader.to_string());
+        }
+    }
+    loaders
+}
+
+fn version_game_versions(tags: &Value) -> Vec<String> {
+    tags.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|tag| loader_name(tag).is_none())
+        .map(String::from)
+        .collect()
+}
+
 #[derive(Serialize)]
 pub struct VersionHit {
     pub id: String,      // Modrinth version id / CurseForge file id
     pub name: String,    // version number or display name
     pub channel: String, // "release" | "beta" | "alpha"
     pub game_versions: Vec<String>,
+    pub loaders: Vec<String>,
     pub date: String,
 }
 
@@ -385,6 +452,7 @@ async fn versions(req: VersionsReq) -> Result<Vec<VersionHit>> {
                         .flatten()
                         .filter_map(|x| x.as_str().map(String::from))
                         .collect(),
+                    loaders: version_loaders(&v["loaders"]),
                     date: v["date_published"].as_str().unwrap_or("").into(),
                 })
                 .collect())
@@ -405,12 +473,8 @@ async fn versions(req: VersionsReq) -> Result<Vec<VersionHit>> {
                     id: f["id"].as_u64().unwrap_or(0).to_string(),
                     name: f["displayName"].as_str().unwrap_or("").into(),
                     channel: cf_channel(f["releaseType"].as_i64().unwrap_or(1)).into(),
-                    game_versions: f["gameVersions"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect(),
+                    game_versions: version_game_versions(&f["gameVersions"]),
+                    loaders: version_loaders(&f["gameVersions"]),
                     date: f["fileDate"].as_str().unwrap_or("").into(),
                 })
                 .collect())
@@ -436,6 +500,8 @@ pub struct InstallReq {
     pub version_id: Option<String>,
     #[serde(default)]
     pub icon: String,
+    #[serde(default)]
+    pub task_id: String,
 }
 
 /// One installed content file, with its version/channel and whether it was pulled in as a dependency.
@@ -452,12 +518,179 @@ pub struct InstalledFile {
     pub icon: String,
 }
 
-#[tauri::command]
-pub async fn mod_install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>, String> {
-    install(app, req).await.map_err(|e| format!("{e:#}"))
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModDownloadProgress {
+    task_id: String,
+    file_name: String,
+    downloaded: u64,
+    total: Option<u64>,
 }
 
-async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> {
+fn emit_mod_progress(
+    app: &AppHandle,
+    context: &ModInstallContext,
+    file_name: &str,
+    downloaded: u64,
+    total: Option<u64>,
+) {
+    let _ = app.emit(
+        "mod-download-progress",
+        ModDownloadProgress {
+            task_id: context.task_id.clone(),
+            file_name: file_name.to_string(),
+            downloaded,
+            total,
+        },
+    );
+}
+
+async fn download_mod_file(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    context: &ModInstallContext,
+) -> Result<()> {
+    if context.is_cancelled() {
+        return Err(anyhow!("Download cancelled"));
+    }
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("mod file");
+    let mut last_error = None;
+
+    for attempt in 0..5u64 {
+        if attempt > 0 {
+            tokio::select! {
+                _ = wait_for_cancel(context.cancelled.clone()) => return Err(anyhow!("Download cancelled")),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(400 * attempt)) => {}
+            }
+        }
+        let temporary = path.with_file_name(format!(
+            "{file_name}.{}.part",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let attempt_result: Result<(u64, Option<u64>)> = async {
+            let response = tokio::select! {
+                _ = wait_for_cancel(context.cancelled.clone()) => return Err(anyhow!("Download cancelled")),
+                response = client.get(url).send() => response?,
+            }
+            .error_for_status()?;
+            let total = response.content_length();
+            let mut stream = response.bytes_stream();
+            let mut output = fs::File::create(&temporary)?;
+            let mut downloaded = 0u64;
+            let mut last_reported = 0u64;
+            emit_mod_progress(app, context, file_name, 0, total);
+
+            loop {
+                let next = tokio::select! {
+                    _ = wait_for_cancel(context.cancelled.clone()) => return Err(anyhow!("Download cancelled")),
+                    next = stream.next() => next,
+                };
+                let Some(chunk) = next else { break };
+                let chunk = chunk?;
+                output.write_all(&chunk)?;
+                downloaded += chunk.len() as u64;
+                if downloaded - last_reported >= 128 * 1024 || total == Some(downloaded) {
+                    emit_mod_progress(app, context, file_name, downloaded, total);
+                    last_reported = downloaded;
+                }
+            }
+            output.flush()?;
+            Ok((downloaded, total))
+        }
+        .await;
+
+        match attempt_result {
+            Ok((downloaded, total)) => {
+                if path.exists() {
+                    let _ = fs::remove_file(&temporary);
+                    return Ok(());
+                }
+                fs::rename(&temporary, path)?;
+                context
+                    .downloaded_files
+                    .lock()
+                    .unwrap()
+                    .push(path.to_path_buf());
+                emit_mod_progress(app, context, file_name, downloaded, total);
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                if context.is_cancelled() {
+                    return Err(anyhow!("Download cancelled"));
+                }
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("Download failed: {url}")))
+}
+
+#[tauri::command]
+pub async fn mod_install(
+    app: AppHandle,
+    mut req: InstallReq,
+) -> Result<Vec<InstalledFile>, String> {
+    if req.task_id.trim().is_empty() {
+        req.task_id = uuid::Uuid::new_v4().to_string();
+    }
+    let task_id = req.task_id.clone();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    {
+        let mut active = active_mod_installs().lock().unwrap();
+        if active.contains_key(&task_id) {
+            return Err("A mod install with this task ID is already running".into());
+        }
+        active.insert(task_id.clone(), cancel_tx);
+    }
+
+    let context = ModInstallContext {
+        task_id: task_id.clone(),
+        cancelled: cancel_rx,
+        downloaded_files: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = tokio::select! {
+        biased;
+        result = install(app, req, context.clone()) => result,
+        _ = wait_for_cancel(context.cancelled.clone()) => Err(anyhow!("Download cancelled")),
+    };
+
+    if context.is_cancelled() {
+        for path in context.downloaded_files.lock().unwrap().iter() {
+            let _ = fs::remove_file(path);
+        }
+    }
+    active_mod_installs().lock().unwrap().remove(&task_id);
+    result.map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub fn cancel_mod_install(task_id: String) -> Result<(), String> {
+    let active = active_mod_installs().lock().unwrap();
+    let Some(cancel) = active.get(&task_id) else {
+        return Err("This mod install is no longer active".into());
+    };
+    cancel.send_replace(true);
+    Ok(())
+}
+
+async fn install(
+    app: AppHandle,
+    req: InstallReq,
+    context: ModInstallContext,
+) -> Result<Vec<InstalledFile>> {
     let (instance_dir, inst) = find_instance(&req.instance)?;
     if inst.loader == "vanilla" {
         return Err(anyhow!(
@@ -478,6 +711,7 @@ async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> 
                 &req.id,
                 &req.title,
                 req.version_id.as_deref(),
+                &context,
             )
             .await
         }
@@ -490,11 +724,15 @@ async fn install(app: AppHandle, req: InstallReq) -> Result<Vec<InstalledFile>> 
                 &req.id,
                 &req.title,
                 req.version_id.as_deref(),
+                &context,
             )
             .await
         }
         s => Err(anyhow!("Unknown source {s}")),
     }?;
+    if context.is_cancelled() {
+        return Err(anyhow!("Download cancelled"));
+    }
     for file in &mut files {
         file.source = source.clone();
         if !file.dependency {
@@ -683,6 +921,7 @@ async fn mr_fetch_one(
     version_id: Option<&str>,
     known_title: Option<&str>,
     dependency: bool,
+    context: &ModInstallContext,
 ) -> Result<(InstalledFile, Vec<(String, Option<String>)>)> {
     let ver: Value = match version_id {
         Some(vid) => jget(c, &format!("{MR}/version/{vid}"), &[], None).await?,
@@ -711,7 +950,7 @@ async fn mr_fetch_one(
         .ok_or_else(|| anyhow!("File has no download link"))?;
     let name = safe_name(file["filename"].as_str().unwrap_or("mod.jar"))?;
     emit(app, format!("Downloading {name}"));
-    game::download(c, url, &mods.join(&name)).await?;
+    download_mod_file(app, c, url, &mods.join(&name), context).await?;
 
     let deps = ver["dependencies"]
         .as_array()
@@ -754,6 +993,7 @@ async fn mr_install(
     project: &str,
     title: &str,
     root_version: Option<&str>,
+    context: &ModInstallContext,
 ) -> Result<Vec<InstalledFile>> {
     // (project id, version id, is this a dependency, known title)
     let mut queue: Vec<(String, Option<String>, bool, Option<String>)> = vec![(
@@ -765,6 +1005,9 @@ async fn mr_install(
     let mut seen = HashSet::new();
     let mut files = vec![];
     while let Some((pid, vid, dependency, known_title)) = queue.pop() {
+        if context.is_cancelled() {
+            return Err(anyhow!("Download cancelled"));
+        }
         if !seen.insert(pid.clone()) {
             continue;
         }
@@ -777,6 +1020,7 @@ async fn mr_install(
             vid.as_deref(),
             known_title.as_deref(),
             dependency,
+            context,
         )
         .await
         {
@@ -784,7 +1028,7 @@ async fn mr_install(
                 files.push(info);
                 queue.extend(deps.into_iter().map(|(id, vid)| (id, vid, true, None)));
             }
-            Err(e) if pid == project => return Err(e),
+            Err(e) if pid == project || context.is_cancelled() => return Err(e),
             Err(e) => emit(app, format!("Skipped required dependency {pid}: {e:#}")),
         }
     }
@@ -801,6 +1045,7 @@ async fn cf_fetch_one(
     known_title: Option<&str>,
     dependency: bool,
     target_file: Option<&str>,
+    context: &ModInstallContext,
 ) -> Result<(InstalledFile, Vec<String>)> {
     let fetched;
     let best = match target_file {
@@ -832,7 +1077,7 @@ async fn cf_fetch_one(
     let (url, name) = cf_url(best).ok_or_else(|| anyhow!("This file has no download link"))?;
     let name = safe_name(&name)?;
     emit(app, format!("Downloading {name}"));
-    game::download(c, &url, &mods.join(&name))
+    download_mod_file(app, c, &url, &mods.join(&name), context)
         .await
         .map_err(|e| anyhow!("{name} could not be downloaded ({e:#}). The author may only allow downloads from the CurseForge website."))?;
 
@@ -869,6 +1114,7 @@ async fn cf_install(
     project: &str,
     title: &str,
     root_version: Option<&str>,
+    context: &ModInstallContext,
 ) -> Result<Vec<InstalledFile>> {
     // (mod id, is this a dependency, known title)
     let mut queue: Vec<(String, bool, Option<String>)> =
@@ -876,6 +1122,9 @@ async fn cf_install(
     let mut seen = HashSet::new();
     let mut files = vec![];
     while let Some((id, dependency, known_title)) = queue.pop() {
+        if context.is_cancelled() {
+            return Err(anyhow!("Download cancelled"));
+        }
         if !seen.insert(id.clone()) {
             continue;
         }
@@ -889,6 +1138,7 @@ async fn cf_install(
             known_title.as_deref(),
             dependency,
             target,
+            context,
         )
         .await
         {
@@ -896,7 +1146,7 @@ async fn cf_install(
                 files.push(info);
                 queue.extend(deps.into_iter().map(|d| (d, true, None)));
             }
-            Err(e) if id == project => return Err(e),
+            Err(e) if id == project || context.is_cancelled() => return Err(e),
             Err(e) => emit(app, format!("Skipped required dependency {id}: {e:#}")),
         }
     }
@@ -912,6 +1162,8 @@ pub struct PackReq {
     pub id: String,
     pub name: String,
     pub java: String,
+    #[serde(default)]
+    pub task_id: String,
     #[serde(default = "default_java_runtime")]
     pub java_mode: String,
 }
@@ -922,7 +1174,10 @@ fn default_java_runtime() -> String {
 
 #[tauri::command]
 pub async fn modpack_install(app: AppHandle, req: PackReq) -> Result<Vec<Instance>, String> {
-    pack(app, req).await.map_err(|e| format!("{e:#}"))
+    let task_id = req.task_id.clone();
+    crate::with_install_task(task_id, pack(app, req))
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 struct Plan {
@@ -1213,7 +1468,18 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
 
 #[cfg(test)]
 mod tests {
-    use super::map_curseforge_proxy_url;
+    use super::{map_curseforge_proxy_url, version_game_versions, version_loaders};
+    use serde_json::json;
+
+    #[test]
+    fn identifies_loader_tags_in_curseforge_game_versions() {
+        let tags = json!(["1.20.1", "Forge", "fabric", "NeoForge", "Quilt"]);
+        assert_eq!(
+            version_loaders(&tags),
+            ["forge", "fabric", "neoforge", "quilt"]
+        );
+        assert_eq!(version_game_versions(&tags), ["1.20.1"]);
+    }
 
     #[test]
     fn curseforge_proxy_preserves_api_path_and_requires_https() {
