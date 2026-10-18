@@ -59,6 +59,20 @@ const DEFAULTS: Settings = {
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
   {
+    v: "0.1.4",
+    title: "Small Update",
+    items: [
+      "Fixed download queue and progress bar issues.",
+      "Fixed Hide/Close behavior when launching a game.",
+      "Disabled download logs in the console to reduce unnecessary output.",
+      "Improved launcher loading and update checking.",
+      "Added mod loader and Minecraft version information when downloading mods.",
+      "Added a task queue for instance downloads, with progress tracking and a cancel button.",
+      "Added a startup window to display loading progress and update checks before the main window opens.",
+      "Improved CurseForge and Modrinth content browsing.",
+    ],
+  },
+  {
     v: "0.1.3",
     title: "Bug Fixes and Improvements",
     items: [

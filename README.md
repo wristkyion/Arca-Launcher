@@ -49,23 +49,19 @@ This project is still in early development, so some features may be incomplete, 
 
 ## Changelog
 
-### 0.1.3 — Bug Fixes and Improvements
+### 0.1.4 — Small Update
 
 **Bug fixes**
-
-- Fixed Forge 1.7.10 downloads by using the correct legacy Maven artifact, and fixed installation for older Forge installers that do not support the modern `installClient` option.
-- Fixed launch failures for legacy Minecraft versions that require Java 8, including Alpha, Beta, and early `rd-` versions, by selecting a compatible runtime.
-- Fixed modded NeoForge launch issues and other instance handling problems.
-- Fixed installed-content navigation so opening content stays within Instances, keeps the Instances navigation item selected, and returns to the instance list correctly.
-- Improved visibility of instance icons in the content view.
+- Fixed download queue and progress bar issues.
+- Fixed Hide/Close behavior when launching a game.
+- Disabled download logs in the console to reduce unnecessary output.
 
 **Features and improvements**
-
-- Added an Installed Content page within each instance for browsing mods, resource packs, and shader packs, with search, enabled-state controls, and folder access.
-- Added content artwork and metadata: marketplace project icons for supported installs, logos discovered inside mod JARs, and `pack.png` artwork from resource-pack ZIP files.
-- Added a more user-friendly downloader experience with project names, icons, and details from Modrinth and CurseForge.
-- Added publisher-configured Microsoft sign-in and a CurseForge proxy integration, removing credential entry fields from user settings. CurseForge still requires publisher-approved API access.
-- Added a launcher update check.
+- Improved launcher loading and update checking.
+- Added mod loader and Minecraft version information when downloading mods.
+- Added a task queue for instance downloads, with progress tracking and a cancel button.
+- Added a startup window to display loading progress and update checks before the main window opens.
+- Improved CurseForge and Modrinth content browsing.
 
 ## Install a release
 
