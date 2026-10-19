@@ -24,7 +24,7 @@ export type Task = {
   key: string; // instance-scoped for installed content; modpacks are global
   title: string;
   icon: string;
-  kind: "mod" | "modpack" | "resourcepack" | "shader" | "instance";
+  kind: "mod" | "modpack" | "resourcepack" | "shader" | "instance" | "migration";
   source: "modrinth" | "curseforge" | "launcher";
   phase: "queued" | "running" | "cancelling" | "cancelled" | "done" | "error";
   detail: string;
@@ -75,6 +75,7 @@ type Ctx = {
   dismiss: (key: string) => void;
   refreshInstalled: (instanceId: string, kind?: "mod" | "resourcepack" | "shader") => Promise<void>;
   configureDownloads: (concurrency: number, autoClear: boolean) => void;
+  startMigration: () => Promise<void>;
 };
 
 const DownloadsCtx = createContext<Ctx | null>(null);
@@ -321,6 +322,21 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     pumpQueueRef.current();
   };
 
+  const startMigration = useCallback(async () => {
+    const key = "legacy-migration";
+    setTasks((ts) => [...ts, {
+      key, title: "Updating instance storage", icon: "", kind: "migration", source: "launcher",
+      phase: "running", detail: "Migrating instances to the new format...", pct: null,
+    }]);
+    try {
+      await invoke("migrate_legacy_instances");
+      patch(key, { phase: "done", detail: "Migration complete", pct: 100 });
+    } catch (error) {
+      patch(key, { phase: "error", detail: String(error), pct: null });
+      throw error;
+    }
+  }, []);
+
   pumpQueueRef.current = () => {
     while (runningCountRef.current < maxConcurrentRef.current && queueRef.current.length > 0) {
       const index = queueRef.current.findIndex((job) => !job.serialKey || !runningSerialKeysRef.current.has(job.serialKey));
@@ -343,7 +359,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const anyRunning = tasks.some((t) => t.phase === "running" || t.phase === "queued" || t.phase === "cancelling");
 
   return (
-    <DownloadsCtx.Provider value={{ tasks, done, anyRunning, install, installInstance, cancel: cancelTask, dismiss, refreshInstalled, configureDownloads }}>
+    <DownloadsCtx.Provider value={{ tasks, done, anyRunning, install, installInstance, startMigration, cancel: cancelTask, dismiss, refreshInstalled, configureDownloads }}>
       {children}
     </DownloadsCtx.Provider>
   );

@@ -49,24 +49,25 @@ This project is still in early development, so some features may be incomplete, 
 
 ## Changelog
 
-### 0.1.4 — Small Update
+### v0.1.5 — Instances
 
-**Bug fixes**
-- Fixed download queue and progress bar issues.
-- Fixed Hide/Close behavior when launching a game.
-- Disabled download logs in the console to reduce unnecessary output.
+This release focuses on fixing custom instance path handling, resolving Windows permission issues, and improving instance management and installer behavior.
 
-**Features and improvements**
-- Improved launcher loading and update checking.
-- Added mod loader and Minecraft version information when downloading mods.
-- Added a task queue for instance downloads, with progress tracking and a cancel button.
-- Added a startup window to display loading progress and update checks before the main window opens.
-- Improved CurseForge and Modrinth content browsing.
+### Bug Fixes
+
+- Fixed custom instance path handling for Windows device paths (`\\?\`) and DOS device path escaping issues.
+- Fixed permission-related errors when running from `Program Files`, including `OS Error 3` and `OS Error 5` when accessing directories or writing settings.
+
+### Features & Improvements
+
+- Improved custom path handling for better compatibility with different storage locations.
+- Updated instance management logic to store `instances.json` separately within each Minecraft instance directory, keeping instance configuration files alongside their respective instances.
+- Updated NSIS and MSI installer configurations to set the required directory permissions during installation, allowing Arca-Launcher to access its required files and folders more reliably.
 
 ## Install a release
 
 1. Open [Arca Launcher releases](https://github.com/wristkyion/Arca-Launcher/releases).
-2. Download the latest installer for your operating system. On Windows, use the `.exe` setup installer or `.msi` package if both are provided.
+2. Download the latest installer for your operating system. On Windows, use the `.exe` setup installer or `.msi` package.
 3. Run the installer and follow its prompts.
 4. Start Arca Launcher and follow the first-run setup. You can add an account or create an instance later if you prefer.
 
@@ -116,7 +117,7 @@ $env:ARCA_CURSEFORGE_PROXY_URL = "https://<publisher-worker>.workers.dev/v1"
 npm run tauri build
 ```
 
-On Windows, Tauri writes the generated installers under `src-tauri\target\release\bundle\`. Look in the `nsis` and `msi` subfolders for the `.exe` and `.msi` packages.
+On Windows, Tauri writes the generated installers under `src-tauri\target\release\bundle\`. Look in the `nsis` and `msi` subfolders for the `.exe` and `.msi` packages. Both installers configure write access for the launcher data folders.
 
 Useful checks:
 

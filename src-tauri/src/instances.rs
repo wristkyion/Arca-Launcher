@@ -2,34 +2,124 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// One installed instance. Stored in launcher/config/instances.json
-#[derive(Serialize, Deserialize, Clone)]
+pub const META_FILE: &str = "instances.json";
+
+/// One Minecraft instance, as the rest of the app and the frontend see it. The folder's own
+/// name under the instances directory is this instance's identity (`id`) - it's filled in when
+/// the folder is read, and is never itself stored inside that folder's instances.json.
+#[derive(Serialize, Clone)]
 pub struct Instance {
-    pub id: String,         // folder name in game/instances/
-    pub name: String,       // what you typed
-    pub loader: String,     // vanilla | fabric | quilt | forge | neoforge
-    pub mc: String,         // Minecraft version
-    pub version_id: String, // profile in game/versions/ (e.g. fabric-loader-0.16.x-1.20.1)
-    #[serde(default)]
-    pub icon: String, // custom logo as a data URL, empty = default for the loader
-    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    pub loader: String,
+    pub mc: String,
+    pub version_id: String,
+    pub icon: String,
     pub description: String,
+    pub background: String,
+}
+
+/// The on-disk shape of <instance folder>/instances.json - everything about an instance except
+/// its id, since the folder itself is the id.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct OnDisk {
+    name: String,
+    loader: String,
+    mc: String,
+    version_id: String,
     #[serde(default)]
-    pub background: String, // background filename in the instance folder, empty = none
+    icon: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    background: String,
 }
 
-pub fn load(dir: &Path) -> Vec<Instance> {
-    std::fs::read_to_string(dir.join("instances.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+impl Instance {
+    fn from_disk(id: String, d: OnDisk) -> Self {
+        Instance {
+            id,
+            name: d.name,
+            loader: d.loader,
+            mc: d.mc,
+            version_id: d.version_id,
+            icon: d.icon,
+            description: d.description,
+            background: d.background,
+        }
+    }
+
+    fn to_disk(&self) -> OnDisk {
+        OnDisk {
+            name: self.name.clone(),
+            loader: self.loader.clone(),
+            mc: self.mc.clone(),
+            version_id: self.version_id.clone(),
+            icon: self.icon.clone(),
+            description: self.description.clone(),
+            background: self.background.clone(),
+        }
+    }
 }
 
-pub fn save(dir: &Path, list: &[Instance]) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(list)
-        .map_err(|e| format!("Failed to serialize instance list: {e}"))?;
-    std::fs::write(dir.join("instances.json"), json)
-        .map_err(|e| format!("Failed to save instance list: {e}"))
+/// Reads one instance folder's instances.json, if present. `Ok(None)` means the folder has no
+/// instances.json and isn't an instance (e.g. a stray folder a user dropped in there) - that is
+/// not an error.
+pub fn read_one(instance_dir: &Path) -> Result<Option<Instance>, String> {
+    let path = instance_dir.join(META_FILE);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
+    };
+    let disk: OnDisk = serde_json::from_str(&contents)
+        .map_err(|e| format!("Could not parse {}: {e}", path.display()))?;
+    let id = instance_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("Invalid instance folder name: {}", instance_dir.display()))?
+        .to_string();
+    Ok(Some(Instance::from_disk(id, disk)))
+}
+
+/// Writes (or overwrites) one instance folder's instances.json.
+pub fn write_one(instance_dir: &Path, instance: &Instance) -> Result<(), String> {
+    std::fs::create_dir_all(instance_dir)
+        .map_err(|e| format!("Could not create instance folder: {e}"))?;
+    let json = serde_json::to_string_pretty(&instance.to_disk())
+        .map_err(|e| format!("Failed to serialize instance: {e}"))?;
+    std::fs::write(instance_dir.join(META_FILE), json)
+        .map_err(|e| format!("Failed to save instance: {e}"))
+}
+
+/// Deletes just the metadata file, so the folder (and everything inside it - saves, mods, etc.)
+/// stops being treated as an instance without touching the actual game files.
+pub fn forget_one(instance_dir: &Path) -> Result<(), String> {
+    match std::fs::remove_file(instance_dir.join(META_FILE)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not remove instance metadata: {error}")),
+    }
+}
+
+/// Scans the direct subfolders of `instances_root` for valid instances. Does not recurse.
+pub fn scan_all(instances_root: &Path) -> Vec<Instance> {
+    let Ok(entries) = std::fs::read_dir(instances_root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match read_one(&path) {
+            Ok(Some(instance)) => out.push(instance),
+            Ok(None) => {}
+            Err(error) => eprintln!("Skipped {}: {error}", path.display()),
+        }
+    }
+    out
 }
 
 const BACKGROUND_FILES: [&str; 4] = [

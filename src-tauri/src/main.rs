@@ -5,6 +5,7 @@ mod auth;
 mod content;
 mod game;
 mod instances;
+mod migration;
 mod mods;
 
 use accounts::{Store, Stored};
@@ -20,6 +21,7 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -335,18 +337,121 @@ fn load_theme(id: String) -> Result<ThemeStylesheet, String> {
 fn root_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."))
 }
+
+#[cfg(windows)]
+fn merge_target_metadata(path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Refusing to follow symbolic link {}", path.display()),
+        )),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn merge_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if let Some(metadata) = merge_target_metadata(destination)? {
+        if !metadata.is_dir() {
+            std::fs::remove_file(destination)?;
+        }
+    }
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if let Some(metadata) = merge_target_metadata(&target)? {
+                if !metadata.is_dir() {
+                    std::fs::remove_file(&target)?;
+                }
+            }
+            merge_directory(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            if let Some(metadata) = merge_target_metadata(&target)? {
+                if metadata.is_dir() {
+                    std::fs::remove_dir_all(&target)?;
+                }
+            }
+            std::fs::copy(entry.path(), target)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Unsupported file type in {}", entry.path().display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn move_legacy_data(legacy_root: &Path, root: &Path) -> std::io::Result<()> {
+    if !legacy_root.is_dir() {
+        return Ok(());
+    }
+    if let (Ok(current), Ok(legacy)) = (root.canonicalize(), legacy_root.canonicalize()) {
+        if current == legacy {
+            return Ok(());
+        }
+    }
+
+    let folders = ["game", "jre", "launcher"];
+    let existing_sources = folders
+        .iter()
+        .filter(|folder| legacy_root.join(folder).is_dir())
+        .copied()
+        .collect::<Vec<_>>();
+    if existing_sources.is_empty() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(root)?;
+    for folder in &existing_sources {
+        merge_directory(&legacy_root.join(folder), &root.join(folder))?;
+    }
+
+    for folder in existing_sources {
+        std::fs::remove_dir_all(legacy_root.join(folder))?;
+    }
+    if std::fs::read_dir(&legacy_root)?.next().is_none() {
+        std::fs::remove_dir(&legacy_root)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn migrate_program_data(root: &Path) -> std::io::Result<()> {
+    let Ok(program_data) = std::env::var("ProgramData") else {
+        return Ok(());
+    };
+    move_legacy_data(&PathBuf::from(program_data).join("Arca Launcher"), root)
+}
+
+#[cfg(windows)]
+static PROGRAM_DATA_MIGRATION: OnceLock<()> = OnceLock::new();
 
 /// Returns (game dir, launcher dir, config dir) and creates the folder layout.
 fn setup_dirs() -> (PathBuf, PathBuf, PathBuf) {
     let root = root_dir();
+    #[cfg(windows)]
+    PROGRAM_DATA_MIGRATION.get_or_init(|| {
+        if let Err(error) = migrate_program_data(&root) {
+            eprintln!("Could not move launcher data from ProgramData: {error}");
+        }
+    });
     let game = root.join("game");
     let launcher = root.join("launcher");
     let config = launcher.join("config");
     for d in [&game, &config, &root.join("jre").join("javaruntime")] {
-        let _ = std::fs::create_dir_all(d);
+        if let Err(error) = std::fs::create_dir_all(d) {
+            eprintln!("Could not create {}: {error}", d.display());
+        }
     }
     (game, launcher, config)
 }
@@ -922,12 +1027,11 @@ struct ContentReq {
 }
 
 fn instance_dir(id: &str) -> Result<PathBuf, String> {
-    let (_, _, cfg) = setup_dirs();
-    let inst = instances::load(&cfg)
-        .into_iter()
-        .find(|i| i.id == id)
-        .ok_or("Instance not found")?;
-    Ok(instance_root()?.join(&inst.id))
+    let dir = instance_root()?.join(id);
+    if instances::read_one(&dir)?.is_none() {
+        return Err("Instance not found".into());
+    }
+    Ok(dir)
 }
 
 #[tauri::command]
@@ -1373,9 +1477,10 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
     let c = game::http();
 
     // 0. The instance to launch
-    let rec = instances::load(&cfg)
-        .into_iter()
-        .find(|i| i.id == req.instance)
+    let instance_root = instance_root().map_err(|error| anyhow!(error))?;
+    let inst_dir = instance_root.join(&req.instance);
+    let rec = instances::read_one(&inst_dir)
+        .map_err(|error| anyhow!(error))?
         .ok_or_else(|| anyhow!("Select an instance first"))?;
     let java = pick_java(&app, &req.java, &req.java_mode, &rec.mc).await?;
     let id = rec.version_id.clone();
@@ -1438,9 +1543,7 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
 
     // 2. Make sure libraries and assets are all there (already-downloaded files are skipped)
     let v = game::resolve(&dir, &id)?;
-    let inst = instance_root()
-        .map_err(|error| anyhow!(error))?
-        .join(&rec.id);
+    let inst = inst_dir;
     game::prepare_instance(&inst)?;
     game::install_deps(&app, &c, &dir, &id, &v, &inst).await?;
 
@@ -1476,32 +1579,23 @@ fn slug(name: &str) -> String {
 
 #[tauri::command]
 fn list_instances() -> Result<Vec<Instance>, String> {
-    let (_, _, cfg) = setup_dirs();
     let root = instance_root()?;
-    let mut list = instances::load(&cfg);
-    let mut migrated = false;
+    let mut list = instances::scan_all(&root);
     for instance in &mut list {
         if instance.background.starts_with("data:image/") {
             let path = root.join(&instance.id);
             instance.background = instances::save_background(&path, &instance.background)?;
-            migrated = true;
+            instances::write_one(&path, instance)?;
         }
-    }
-    if migrated {
-        instances::save(&cfg, &list)?;
     }
     Ok(list)
 }
 
 #[tauri::command]
 fn load_instance_background(id: String) -> Result<Option<String>, String> {
-    let (_, _, cfg) = setup_dirs();
     let root = instance_root()?;
-    let instance = instances::load(&cfg)
-        .into_iter()
-        .find(|instance| instance.id == id)
-        .ok_or_else(|| "Instance not found".to_string())?;
-    let path = root.join(&instance.id);
+    let path = root.join(&id);
+    let instance = instances::read_one(&path)?.ok_or_else(|| "Instance not found".to_string())?;
     instances::read_background(&path, &instance.background)
 }
 
@@ -1538,7 +1632,7 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
     if name.is_empty() {
         anyhow::bail!("Give the instance a name");
     }
-    let (dir, _, cfg) = setup_dirs();
+    let (dir, _, _cfg) = setup_dirs();
     let instance_root = instance_root().map_err(|error| anyhow!(error))?;
     let c = game::http();
     let java = pick_java(&app, &req.java, &req.java_mode, &req.mc).await?;
@@ -1548,21 +1642,21 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
     let version_id = game::install_loader(&app, &c, &dir, &req.loader, &req.mc, &java).await?;
     let v = game::resolve(&dir, &version_id)?;
 
-    let mut list = instances::load(&cfg);
     let base = slug(&name);
     let mut id = base.clone();
     let mut n = 2;
-    while list.iter().any(|i| i.id == id) || instance_root.join(&id).exists() {
+    while instance_root.join(&id).exists() {
         id = format!("{base}-{n}");
         n += 1;
     }
-    let inst = instance_root.join(&id);
-    game::install_deps(&app, &c, &dir, &version_id, &v, &inst).await?;
-    game::prepare_instance(&inst)?;
+    let inst_dir = instance_root.join(&id);
+    game::install_deps(&app, &c, &dir, &version_id, &v, &inst_dir).await?;
+    game::prepare_instance(&inst_dir)?;
 
-    let background = instances::save_background(&inst, &req.background).map_err(|e| anyhow!(e))?;
-    list.push(Instance {
-        id,
+    let background =
+        instances::save_background(&inst_dir, &req.background).map_err(|e| anyhow!(e))?;
+    let instance = Instance {
+        id: id.clone(),
         name,
         loader: req.loader,
         mc: req.mc,
@@ -1570,9 +1664,13 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
         icon: req.icon,
         description: req.description,
         background,
-    });
-    instances::save(&cfg, &list).map_err(|e| anyhow!(e))?;
+    };
+    instances::write_one(&inst_dir, &instance).map_err(|e| anyhow!(e))?;
     emit(&app, "Instance ready");
+
+    let mut list = instances::scan_all(&instance_root);
+    list.retain(|i| i.id != id);
+    list.push(instance);
     Ok(list)
 }
 
@@ -1587,29 +1685,20 @@ struct EditReq {
 
 #[tauri::command]
 fn edit_instance(req: EditReq) -> Result<Vec<Instance>, String> {
-    let (_, _, cfg) = setup_dirs();
-    let instance_root = instance_root()?;
-    let mut list = instances::load(&cfg);
+    let root = instance_root()?;
+    let dir = root.join(&req.id);
+    let mut instance = instances::read_one(&dir)?.ok_or("Instance not found")?;
     let name = req.name.trim();
     if name.is_empty() {
         return Err("The name can't be empty".into());
     }
-    let instance_id = list
-        .iter()
-        .find(|i| i.id == req.id)
-        .map(|i| i.id.clone())
-        .ok_or("Instance not found")?;
-    let background = instances::save_background(&instance_root.join(instance_id), &req.background)?;
-    let i = list
-        .iter_mut()
-        .find(|i| i.id == req.id)
-        .ok_or("Instance not found")?;
-    i.name = name.to_string();
-    i.icon = req.icon;
-    i.description = req.description;
-    i.background = background;
-    instances::save(&cfg, &list)?;
-    Ok(list)
+    let background = instances::save_background(&dir, &req.background)?;
+    instance.name = name.to_string();
+    instance.icon = req.icon;
+    instance.description = req.description;
+    instance.background = background;
+    instances::write_one(&dir, &instance)?;
+    Ok(instances::scan_all(&root))
 }
 
 #[derive(Deserialize)]
@@ -1620,19 +1709,18 @@ struct RemoveReq {
 
 #[tauri::command]
 fn remove_instance(req: RemoveReq) -> Result<Vec<Instance>, String> {
-    let (_, _, cfg) = setup_dirs();
-    let mut list = instances::load(&cfg);
-    if req.delete_files && list.iter().any(|i| i.id == req.id) {
-        let path = instance_root()?.join(&req.id);
-        match std::fs::remove_dir_all(&path) {
+    let root = instance_root()?;
+    let dir = root.join(&req.id);
+    if req.delete_files {
+        match std::fs::remove_dir_all(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("Could not delete instance files: {error}")),
         }
+    } else {
+        instances::forget_one(&dir)?;
     }
-    list.retain(|i| i.id != req.id);
-    instances::save(&cfg, &list)?;
-    Ok(list)
+    Ok(instances::scan_all(&root))
 }
 
 fn main() {
@@ -1696,7 +1784,9 @@ fn main() {
             list_themes,
             load_theme,
             set_instance_directory,
-            download_java_runtime
+            download_java_runtime,
+            migration::legacy_migration_pending,
+            migration::migrate_legacy_instances
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1760,6 +1850,68 @@ mod launcher_update_tests {
         assert!(!version_is_newer("0.1.2", "0.1.2"));
         assert!(!version_is_newer("0.1.1", "0.1.2"));
         assert!(!version_is_newer("not-a-version", "0.1.2"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod data_migration_tests {
+    use super::move_legacy_data;
+    use std::path::PathBuf;
+
+    fn test_paths() -> (PathBuf, PathBuf, PathBuf) {
+        let temp = std::env::temp_dir().join(format!(
+            "arca-launcher-migration-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let legacy = temp.join("ProgramData").join("Arca Launcher");
+        let root = temp.join("Install");
+        (temp, legacy, root)
+    }
+
+    #[test]
+    fn moves_program_data_folders_beside_the_executable() {
+        let (temp, legacy, root) = test_paths();
+        let account_file = legacy.join("launcher").join("config").join("accounts.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(account_file.parent().unwrap()).unwrap();
+        std::fs::write(&account_file, "{}").unwrap();
+        std::fs::create_dir_all(legacy.join("game")).unwrap();
+        std::fs::create_dir_all(legacy.join("jre")).unwrap();
+
+        move_legacy_data(&legacy, &root).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("launcher/config/accounts.json")).unwrap(),
+            "{}"
+        );
+        assert!(root.join("game").is_dir());
+        assert!(root.join("jre").is_dir());
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn program_data_replaces_matching_files_and_keeps_other_destination_files() {
+        let (temp, legacy, root) = test_paths();
+        let source_file = legacy.join("launcher").join("config").join("accounts.json");
+        let destination_file = root.join("launcher").join("config").join("accounts.json");
+        let destination_extra = root.join("launcher").join("themes").join("old.css");
+        std::fs::create_dir_all(source_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(destination_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(destination_extra.parent().unwrap()).unwrap();
+        std::fs::write(&source_file, "program data").unwrap();
+        std::fs::write(&destination_file, "existing").unwrap();
+        std::fs::write(&destination_extra, "keep").unwrap();
+
+        move_legacy_data(&legacy, &root).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination_file).unwrap(),
+            "program data"
+        );
+        assert_eq!(std::fs::read_to_string(destination_extra).unwrap(), "keep");
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(temp).unwrap();
     }
 }
 

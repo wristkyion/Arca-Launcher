@@ -59,6 +59,18 @@ const DEFAULTS: Settings = {
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
   {
+    v: "0.1.5",
+    title: "Instances",
+    items: [
+      "Fixed custom instance path handling for Windows device paths (\\?\) and DOS device path escaping issues.",
+      "Fixed permission-related errors when running from Program Files, including (OS Error 3) and (OS Error 5) when accessing directories or writing settings.",
+      "Improved custom path handling for better compatibility with different storage locations.",
+      "Updated instance management logic to store (instances.json) separately within each Minecraft instance directory, keeping instance configuration files alongside their respective instances.",
+      "Added mod loader and Minecraft version information when downloading mods.",
+      "Updated NSIS and MSI installer configurations to set the required directory permissions during installation, allowing Arca-Launcher to access its required files and folders more reliably.",
+    ],
+  },
+  {
     v: "0.1.4",
     title: "Small Update",
     items: [
@@ -331,7 +343,7 @@ function AppInner() {
       return new URLSearchParams(window.location.search).get("window") === "splash";
     }
   })();
-  const { configureDownloads, installInstance } = useDownloads();
+  const { configureDownloads, installInstance, startMigration } = useDownloads();
   const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [page, setPageNow] = useState<Page>("play");
   const [fade, setFade] = useState<"in" | "out">("in");
@@ -526,12 +538,20 @@ function AppInner() {
     invoke<AccList>("list_accounts").then(applyList).catch((e) => {
       add(`Could not load accounts: ${e}`);
     }).finally(() => setAccountsReady(true));
-    invoke<Instance[]>("list_instances").then((l) => {
-      setInstances(l);
-      setInstId((cur) => (l.some((i) => i.id === cur) ? cur : l[0]?.id ?? ""));
-    }).catch((e) => {
-      add(`Could not load instances: ${e}`);
-    }).finally(() => setInstancesReady(true));
+    (async () => {
+      try {
+        if (await invoke<boolean>("legacy_migration_pending")) {
+          await startMigration();
+        }
+        const l = await invoke<Instance[]>("list_instances");
+        setInstances(l);
+        setInstId((cur) => (l.some((i) => i.id === cur) ? cur : l[0]?.id ?? ""));
+      } catch (e) {
+        add(`Could not load instances: ${e}`);
+      } finally {
+        setInstancesReady(true);
+      }
+    })();
     loadVersions();
     invoke<number>("system_ram").then(setSysRam).catch(() => {});
     const subs = [

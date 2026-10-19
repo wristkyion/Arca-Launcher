@@ -125,14 +125,12 @@ fn safe_rel(s: &str) -> Result<PathBuf> {
 }
 
 fn find_instance(id: &str) -> Result<(PathBuf, Instance)> {
-    let (_, _, cfg) = crate::setup_dirs();
-    let inst = instances::load(&cfg)
-        .into_iter()
-        .find(|i| i.id == id)
-        .ok_or_else(|| anyhow!("Instance not found"))?;
     let instance_dir = crate::instance_root()
         .map_err(|error| anyhow!("{error}"))?
-        .join(&inst.id);
+        .join(id);
+    let inst = instances::read_one(&instance_dir)
+        .map_err(|error| anyhow!("{error}"))?
+        .ok_or_else(|| anyhow!("Instance not found"))?;
     Ok((instance_dir, inst))
 }
 
@@ -1338,7 +1336,7 @@ fn extract_overrides(archive: &Path, prefixes: &[String], inst: &Path) -> Result
 }
 
 async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
-    let (dir, launcher, cfg) = crate::setup_dirs();
+    let (dir, launcher, _cfg) = crate::setup_dirs();
     let instance_root = crate::instance_root().map_err(|error| anyhow!("{error}"))?;
     let c = game::http();
     let name = req.name.trim().to_string();
@@ -1374,11 +1372,10 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     let version_id = game::install_loader(&app, &c, &dir, &plan.loader, &plan.mc, &java).await?;
     let v = game::resolve(&dir, &version_id)?;
 
-    let mut list = instances::load(&cfg);
     let base = crate::slug(&name);
     let mut id = base.clone();
     let mut n = 2;
-    while list.iter().any(|i| i.id == id) || instance_root.join(&id).exists() {
+    while instance_root.join(&id).exists() {
         id = format!("{base}-{n}");
         n += 1;
     }
@@ -1451,8 +1448,8 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     // 5. config files, resource packs etc. shipped inside the pack
     extract_overrides(&archive, &plan.overrides, &inst)?;
 
-    list.push(Instance {
-        id,
+    let instance = Instance {
+        id: id.clone(),
         name,
         loader: plan.loader,
         mc: plan.mc,
@@ -1460,9 +1457,12 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
         icon: String::new(),
         description: String::new(),
         background: String::new(),
-    });
-    instances::save(&cfg, &list).map_err(|e| anyhow!("{e}"))?;
+    };
+    instances::write_one(&inst, &instance).map_err(|e| anyhow!("{e}"))?;
     emit(&app, "Instance ready");
+    let mut list = instances::scan_all(&instance_root);
+    list.retain(|i| i.id != id);
+    list.push(instance);
     Ok(list)
 }
 

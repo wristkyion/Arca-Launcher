@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <Fragment>
+    <!-- Create Arca writable data directories -->
+    <DirectoryRef Id="INSTALLDIR">
+
+      <Directory Id="ArcaGameDataDir" Name="game">
+        <Component
+          Id="ArcaGameDataFolder"
+          Guid="8A146C3A-9D23-4F55-8D71-764C31D12261">
+          <CreateFolder />
+        </Component>
+      </Directory>
+
+      <Directory Id="ArcaJavaDataDir" Name="jre">
+        <Component
+          Id="ArcaJavaDataFolder"
+          Guid="9F6A101D-108D-4F69-84DA-D5AAB0CD9BA2">
+          <CreateFolder />
+        </Component>
+      </Directory>
+
+      <Directory Id="ArcaLauncherDataDir" Name="launcher">
+        <Component
+          Id="ArcaLauncherDataFolder"
+          Guid="F7B93A68-CC8D-44B7-A638-02CD7584CD22">
+          <CreateFolder />
+        </Component>
+      </Directory>
+
+    </DirectoryRef>
+
+    <!-- Register the directories with Tauri's WiX bundle -->
+    <ComponentGroup Id="ArcaLauncherWritableDataFolders">
+      <ComponentRef Id="ArcaGameDataFolder" />
+      <ComponentRef Id="ArcaJavaDataFolder" />
+      <ComponentRef Id="ArcaLauncherDataFolder" />
+    </ComponentGroup>
+
+    <!-- Prepare elevated deferred actions using CustomActionData -->
+    <CustomAction
+      Id="SetGrantArcaGameDataPermissions"
+      Property="GrantArcaGameDataPermissions"
+      Value='&quot;[System64Folder]icacls.exe&quot; &quot;[INSTALLDIR]game&quot; /grant *S-1-5-32-545:(OI)(CI)M /T /C'
+      Execute="immediate"
+      Return="check" />
+
+    <CustomAction
+      Id="GrantArcaGameDataPermissions"
+      BinaryKey="WixCA"
+      DllEntry="WixQuietExec64"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
+    <CustomAction
+      Id="SetGrantArcaJavaDataPermissions"
+      Property="GrantArcaJavaDataPermissions"
+      Value='&quot;[System64Folder]icacls.exe&quot; &quot;[INSTALLDIR]jre&quot; /grant *S-1-5-32-545:(OI)(CI)M /T /C'
+      Execute="immediate"
+      Return="check" />
+
+    <CustomAction
+      Id="GrantArcaJavaDataPermissions"
+      BinaryKey="WixCA"
+      DllEntry="WixQuietExec64"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
+    <CustomAction
+      Id="SetGrantArcaLauncherDataPermissions"
+      Property="GrantArcaLauncherDataPermissions"
+      Value='&quot;[System64Folder]icacls.exe&quot; &quot;[INSTALLDIR]launcher&quot; /grant *S-1-5-32-545:(OI)(CI)M /T /C'
+      Execute="immediate"
+      Return="check" />
+
+    <CustomAction
+      Id="GrantArcaLauncherDataPermissions"
+      BinaryKey="WixCA"
+      DllEntry="WixQuietExec64"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
+    <!-- Run after files and directories are installed -->
+    <InstallExecuteSequence>
+
+      <Custom Action="SetGrantArcaGameDataPermissions"
+              After="InstallFiles">NOT REMOVE</Custom>
+
+      <Custom Action="GrantArcaGameDataPermissions"
+              After="SetGrantArcaGameDataPermissions">NOT REMOVE</Custom>
+
+      <Custom Action="SetGrantArcaJavaDataPermissions"
+              After="GrantArcaGameDataPermissions">NOT REMOVE</Custom>
+
+      <Custom Action="GrantArcaJavaDataPermissions"
+              After="SetGrantArcaJavaDataPermissions">NOT REMOVE</Custom>
+
+      <Custom Action="SetGrantArcaLauncherDataPermissions"
+              After="GrantArcaJavaDataPermissions">NOT REMOVE</Custom>
+
+      <Custom Action="GrantArcaLauncherDataPermissions"
+              After="SetGrantArcaLauncherDataPermissions">NOT REMOVE</Custom>
+
+    </InstallExecuteSequence>
+  </Fragment>
+
+</Wix>
