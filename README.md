@@ -195,8 +195,6 @@ Author: Your Name
 }
 ```
 
-Themes support CSS only. `@import`, CSS `url(...)`, `image-set(...)`, and CSS escape sequences are blocked; themes larger than 256 KB are skipped. A theme can still change the layout, so switch back to **Default** in Settings if a custom theme makes the launcher hard to use.
-
 ## Support
 
 Report bugs or request features through the repository's [Issues](https://github.com/wristkyion/Arca-Launcher/issues). Include your operating system, what you were doing, and the exact error text. Redact usernames, file paths, authentication codes, passwords, access tokens, and API keys from logs or screenshots.
