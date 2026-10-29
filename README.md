@@ -1,6 +1,12 @@
 <h1 align="center">Arca Launcher</h1>
 
-<h1 align="center">DISCONTINUED</h1>
+> **Project Status: DISCONTINUED**
+>
+> Arca Launcher is no longer actively maintained. Development has been discontinued as the developer has decided to focus on other projects.
+>
+> The existing source code remains available for reference, learning, and forking. However, no further updates, bug fixes, or new features are planned.
+>
+> Thank you to everyone who took an interest in Arca Launcher.
 
 <p align="center">
   A custom Minecraft launcher built with Tauri, Rust, React, and TypeScript.
