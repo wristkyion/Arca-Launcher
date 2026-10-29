@@ -1,5 +1,7 @@
 <h1 align="center">Arca Launcher</h1>
 
+<h1 align="center">DISCONTINUED</h1>
+
 <p align="center">
   A custom Minecraft launcher built with Tauri, Rust, React, and TypeScript.
 </p>
