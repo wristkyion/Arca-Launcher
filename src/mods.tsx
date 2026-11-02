@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { taskKey, useDownloads } from "./downloads";
@@ -186,7 +187,7 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
         {loading && <span className="mods-searching"><i /> Updating results</span>}
       </div>
       <div className="mgrid">
-        {hits.map((h) => {
+        {hits.map((h, index) => {
           const key = keyOf(h);
           const t = taskFor(h);
           const isRunning = t?.phase === "running" || t?.phase === "queued" || t?.phase === "cancelling";
@@ -198,7 +199,7 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
           const deps = files?.filter((f) => f.dependency) ?? [];
 
           return (
-            <div className="mcard" key={h.id}>
+            <div className="mcard animate-stagger" key={h.id} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
               <div className="mcardtop">
                 <img className="micon" src={h.icon} width={56} height={56} alt=""
                   onError={(e) => e.currentTarget.classList.add("is-hidden")} />
@@ -261,7 +262,10 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
       )}
 
       {picker && (() => {
-        return (
+        const portals = document.getElementById("portals");
+        if (!portals) return null;
+        
+        return createPortal(
           <>
             <div className="scrim popfade" onClick={closePicker} />
             <div className="verpicker pop">
@@ -370,7 +374,8 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
                   </button>
                 </div>
             </div>
-          </>
+          </>,
+          portals
         );
       })()}
     </section>

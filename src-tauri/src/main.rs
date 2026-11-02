@@ -1813,6 +1813,25 @@ fn remove_instance(req: RemoveReq) -> Result<Vec<Instance>, String> {
     Ok(instances::scan_all(&root))
 }
 
+#[tauri::command]
+fn minimize_window(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
+fn toggle_maximize(window: tauri::Window) {
+    if window.is_maximized().unwrap_or(false) {
+        let _ = window.unmaximize();
+    } else {
+        let _ = window.maximize();
+    }
+}
+
+#[tauri::command]
+fn close_window(window: tauri::Window) {
+    let _ = window.close();
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1877,7 +1896,10 @@ fn main() {
             download_java_runtime,
             check_java_info,
             migration::legacy_migration_pending,
-            migration::migrate_legacy_instances
+            migration::migrate_legacy_instances,
+            minimize_window,
+            toggle_maximize,
+            close_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

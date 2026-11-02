@@ -190,8 +190,8 @@ export default function ContentPage({
           <div className="library-empty library-empty-small"><h3>No matches</h3><p>Try a different search or show disabled items.</p></div>
         )}
         {filtered.length > 0 && <div className="library-grid">
-          {filtered.map((item) => (
-            <article className={"library-card" + (!item.enabled ? " is-disabled" : "")} key={item.file_name}>
+          {filtered.map((item, index) => (
+            <article className={("library-card" + (!item.enabled ? " is-disabled" : "") + " animate-stagger")} key={item.file_name} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
               <Artwork item={item} kind={kind} />
               <div className="library-card-content">
                 <div className="library-card-title">

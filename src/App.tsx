@@ -45,6 +45,7 @@ type Settings = {
   instanceDirectory: string;
   javaRuntime: "system" | "custom";
   theme: string;
+  reduceAnimations: boolean;
 };
 const DEFAULTS: Settings = {
   ramAuto: true, jvmArgs: "", gameArgs: "", launchFullscreen: false, hide: "keep",
@@ -54,6 +55,7 @@ const DEFAULTS: Settings = {
   instanceDirectory: "",
   javaRuntime: "system",
   theme: DEFAULT_THEME_ID,
+  reduceAnimations: false,
 };
 
 // Edit this list to publish your own launcher changelogs (newest first).
@@ -263,12 +265,14 @@ function Cube({ tex, tw, th, s, g, d, o, at }:
 function SkinModel({ data, slim, s = 5 }: { data: string; slim: boolean; s?: number }) {
   const HOME = { x: -24, y: 32 }; // x: tilt (negative = camera above), y: turn (positive = camera to the left)
   const [dim, setDim] = useState<[number, number]>([64, 64]);
-  const rot = HOME;
+  const [rot, setRot] = useState(HOME);
+
   useEffect(() => {
     const i = new Image();
     i.onload = () => setDim([i.width, i.height]);
     i.src = data;
   }, [data]);
+
   const [tw, th] = dim;
   const legacy = th < 64;
   const aw = slim ? 3 : 4;
@@ -280,12 +284,12 @@ function SkinModel({ data, slim, s = 5 }: { data: string; slim: boolean; s?: num
     <div className="stage">
       <div className="rig" style={{ "--rig-transform": `rotateX(${rot.x}deg) rotateY(${rot.y}deg)` } as CSSVars}>
         <Cube {...c} g={[8, 8, 8]} d={[8, 8, 8]} o={[0, 0]} at={[0, -10 - Y, 0]} />
+        <Cube {...c} g={[9, 9, 9]} d={[8, 8, 8]} o={[32, 0]} at={[0, -10 - Y, 0]} />
         <Cube {...c} g={[8, 12, 4]} d={[8, 12, 4]} o={[16, 16]} at={[0, -Y, 0]} />
         <Cube {...c} g={[aw, 12, 4]} d={[aw, 12, 4]} o={[40, 16]} at={[-ax, -Y, 0]} />
         <Cube {...c} g={[aw, 12, 4]} d={[aw, 12, 4]} o={legacy ? [40, 16] : [32, 48]} at={[ax, -Y, 0]} />
         <Cube {...c} g={[4, 12, 4]} d={[4, 12, 4]} o={[0, 16]} at={[-2, 12 - Y, 0]} />
         <Cube {...c} g={[4, 12, 4]} d={[4, 12, 4]} o={legacy ? [0, 16] : [16, 48]} at={[2, 12 - Y, 0]} />
-        <Cube {...c} g={[9, 9, 9]} d={[8, 8, 8]} o={[32, 0]} at={[0, -10 - Y, 0]} />
         {!legacy && (<>
           <Cube {...c} g={[8.5, 12.5, 4.5]} d={[8, 12, 4]} o={[16, 32]} at={[0, -Y, 0]} />
           <Cube {...c} g={[aw + 0.5, 12.5, 4.5]} d={[aw, 12, 4]} o={[40, 32]} at={[-ax, -Y, 0]} />
@@ -723,8 +727,12 @@ function AppInner() {
   const activeStartupCheck = startupChecks.find((check) => !check.ready);
   const startupReady = (completedStartupChecks === startupChecks.length && bootMinimumElapsed) || bootTimedOut;
   useEffect(() => {
-    (document.body.style as any).zoom = String(isSplashWindow ? 1 : st.uiScale / 100);
-  }, [st.uiScale, isSplashWindow]);
+    const root = document.getElementById("root");
+    if (root) {
+      (root.style as any).zoom = String(isSplashWindow ? 1 : st.uiScale / 100);
+    }
+    document.body.className = st.reduceAnimations ? "reduce-animations" : "";
+  }, [st.uiScale, st.reduceAnimations, isSplashWindow]);
 
   useEffect(() => {
     if (!isSplashWindow || !startupReady || mainWindowRestored.current) return;
@@ -1251,8 +1259,9 @@ function AppInner() {
                     {menuOpen && (<>
                       <div className="scrim" onClick={closeMenu} />
                       <div className={"menu" + (menuClosing ? " closing" : "")}>
-                        {instances.map((i) => (
-                          <button key={i.id} className={"mitem" + (i.id === instId ? " on" : "")}
+                        {instances.map((i, index) => (
+                          <button key={i.id} className={("mitem" + (i.id === instId ? " on" : "") + " animate-stagger")}
+                            style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
                             onClick={() => { setInstId(i.id); closeMenu(); }}>
                             <InstIcon inst={i} size={30} />
                             <div><b>{i.name}</b><small>{cap(i.loader)} · {i.mc}</small></div>
@@ -1304,10 +1313,11 @@ function AppInner() {
                       <div className="menu home-account-menu" role="listbox" aria-label="Switch account">
                         {accounts.length === 0
                           ? <p className="home-account-empty">No saved accounts. Add one from Accounts.</p>
-                          : accounts.map((account) => (
+                          : accounts.map((account, index) => (
                             <button
                               key={account.id}
-                              className={"mitem home-account-option" + (account.id === selected ? " on" : "")}
+                              className={("mitem home-account-option" + (account.id === selected ? " on" : "") + " animate-stagger")}
+                              style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
                               role="option"
                               aria-selected={account.id === selected}
                               onClick={() => selectFromHome(account.id)}
@@ -1357,8 +1367,8 @@ function AppInner() {
                       <div className="account-empty"><span className="empty-avatar"><Icon n="user" /></span>
                         <b>No accounts yet</b><p>Add an account to get started.</p></div>
                     )}
-                    {accounts.map((a) => (
-                      <div key={a.id} className={"acc" + (a.id === selected ? " on" : "")}>
+                    {accounts.map((a, index) => (
+                      <div key={a.id} className={("acc" + (a.id === selected ? " on" : "") + " animate-stagger")} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
                         <Avatar acc={a} skin={skins[a.id] ?? null} />
                         <div className="ainfo"><b>{a.username}</b><span>{KIND_LABEL[a.kind]}</span></div>
                         {a.id === selected
@@ -1515,8 +1525,8 @@ function AppInner() {
                       <b>Your library is empty</b><p>Create an instance to start playing.</p>
                       <button className="btn purple" onClick={() => setTab("download")}>Create an instance</button></div>
                   )}
-                  {instances.map((i) => (
-                    <div key={i.id} className={"icard" + (i.id === instId ? " on" : "")}>
+                  {instances.map((i, index) => (
+                    <div key={i.id} className={("icard" + (i.id === instId ? " on" : "") + " animate-stagger")} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
                       <div className="icard-top">
                         <div className="icard-art"><InstIcon inst={i} size={52} /><span>{i.mc}</span></div>
                         {i.id === instId && <span className="badge">Selected</span>}
@@ -1647,12 +1657,6 @@ function AppInner() {
                       <input type="range" min={1} max={5} step={1} value={st.downloadConcurrency}
                         onChange={(e) => set("downloadConcurrency", +e.target.value)} />
                       <p className="setting-note">Higher values can use more bandwidth and system resources.</p>
-                      <label className="check">
-                        <input type="checkbox" checked={st.autoClearDownloads}
-                          onChange={(e) => set("autoClearDownloads", e.target.checked)} />
-                        Automatically clear completed downloads
-                      </label>
-                      <p className="setting-note">Turn this off to keep completed downloads in the tray until dismissed.</p>
                     </section>
                   </div>
                 </div>
@@ -1670,6 +1674,11 @@ function AppInner() {
                       </select>
                       <label>Interface size <span className="field-value">{st.uiScale}%</span></label>
                       <input type="range" min={80} max={200} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
+                      <label className="check">
+                        <input type="checkbox" checked={st.reduceAnimations} onChange={(e) => set("reduceAnimations", e.target.checked)} />
+                        Reduce animations
+                      </label>
+                      <p className="setting-note">Minimizes motion effects throughout the launcher. Helpful for motion sensitivity or performance.</p>
                     </section>
 
                     <section className="setting-card">

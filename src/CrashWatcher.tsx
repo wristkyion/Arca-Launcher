@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 
 type CrashPayload = {
@@ -24,7 +25,10 @@ export default function CrashWatcher() {
 
   if (!crash) return null;
 
-  return (
+  const portals = document.getElementById("portals");
+  if (!portals) return null;
+
+  return createPortal(
     <>
       <div className="scrim popfade" onClick={() => setCrash(null)} />
       <div className="crashdialog pop">
@@ -44,6 +48,7 @@ export default function CrashWatcher() {
           <button className="mini" onClick={() => setCrash(null)}>Close</button>
         </div>
       </div>
-    </>
+    </>,
+    portals
   );
 }
