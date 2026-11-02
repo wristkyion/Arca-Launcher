@@ -61,6 +61,19 @@ const DEFAULTS: Settings = {
 // Edit this list to publish your own launcher changelogs (newest first).
 const CHANGELOG: { v: string; title: string; items: string[] }[] = [
   {
+    v: "0.1.6",
+    title: "Rework",
+    items: [
+      "New Logo/icon",
+      "Enhanced the UI with new startup animations",
+      "Introduced a new title bar design that displays the latest version of Arca",
+      "Fixed issues where the Java Runtime would fail or could not be executed",
+      "Resolved issues where Java would fail during execution",
+      "Improved the task panel with a new visual style",
+      "Focused on optimizations",
+    ],
+  },
+  {
     v: "0.1.5",
     title: "Instances",
     items: [

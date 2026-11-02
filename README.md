@@ -1,13 +1,5 @@
 <h1 align="center">Arca Launcher</h1>
 
-> **Project Status: DISCONTINUED**
->
-> Arca Launcher is no longer actively maintained. Development has been discontinued as the developer has decided to focus on other projects.
->
-> The existing source code remains available for reference, learning, and forking. However, no further updates, bug fixes, or new features are planned.
->
-> Thank you to everyone who took an interest in Arca Launcher.
-
 <p align="center">
   A custom Minecraft launcher built with Tauri, Rust, React, and TypeScript.
 </p>
@@ -57,20 +49,22 @@ This project is still in early development, so some features may be incomplete, 
 
 ## Changelog
 
-### v0.1.5 — Instances
+### v0.1.6 — Rework
 
-This release focuses on fixing custom instance path handling, resolving Windows permission issues, and improving instance management and installer behavior.
+This release focuses on fixing javaruntime, rework entire animation UI, and improving task panel.
 
 ### Bug Fixes
 
-- Fixed custom instance path handling for Windows device paths (`\\?\`) and DOS device path escaping issues.
-- Fixed permission-related errors when running from `Program Files`, including `OS Error 3` and `OS Error 5` when accessing directories or writing settings.
+- Fixed issues where the Java Runtime would fail or could not be executed
+- Resolved issues where Java would fail during execution
 
 ### Features & Improvements
 
-- Improved custom path handling for better compatibility with different storage locations.
-- Updated instance management logic to store `instances.json` separately within each Minecraft instance directory, keeping instance configuration files alongside their respective instances.
-- Updated NSIS and MSI installer configurations to set the required directory permissions during installation, allowing Arca-Launcher to access its required files and folders more reliably.
+- New logo/icon
+- Enhanced the UI with new startup animations
+- Introduced a new title bar design that displays the latest version of Arca
+- Improved the task panel with a new visual style
+- Focused on optimizations
 
 ## Install a release
 
