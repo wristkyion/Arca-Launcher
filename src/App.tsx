@@ -43,7 +43,7 @@ type Settings = {
   showSnapshots: boolean; showExperimental: boolean; showBeta: boolean; showAlpha: boolean;
   downloadConcurrency: number; autoClearDownloads: boolean;
   instanceDirectory: string;
-  javaRuntime: "system" | "launcher";
+  javaRuntime: "system" | "custom";
   theme: string;
 };
 const DEFAULTS: Settings = {
@@ -1588,18 +1588,17 @@ function AppInner() {
                         set("javaRuntime", e.target.value as Settings["javaRuntime"]);
                         setJavaRuntimeMessage("");
                       }}>
-                        <option value="system">System Java (default)</option>
-                        <option value="launcher">Launcher-managed Java</option>
+                        <option value="system">Default System - (Default)</option>
+                        <option value="custom">Custom Java path</option>
                       </select>
-                      <p className="setting-note">Use Java installed on your system or let the launcher download a private runtime.</p>
-                      {st.javaRuntime === "launcher" && <>
-                        <button className="btn" onClick={downloadJavaRuntime} disabled={!inst || javaRuntimeBusy}>
-                          {javaRuntimeBusy ? "Downloading Java..." : `Download Java for ${inst?.mc ?? "selected instance"}`}
-                        </button>
-                        {javaRuntimeMessage && <p className="setting-note">{javaRuntimeMessage}</p>}
+                      {st.javaRuntime === "system" && <>
+                        <p className="setting-note">Launcher automatically downloads the correct Java version for each Minecraft release.</p>
                       </>}
-                      <label>Custom Java path <span className="field-note">Leave as "java" to use the selected runtime</span></label>
-                      <input value={java} onChange={(e) => setJava(e.target.value)} />
+                      {st.javaRuntime === "custom" && <>
+                        <p className="setting-note">Use Java installed on your computer. Specify the full path to java.exe below.</p>
+                        <label>Custom Java path</label>
+                        <input value={java} onChange={(e) => setJava(e.target.value)} placeholder="C:\Program Files\Java\jre-1.8\bin\java.exe" />
+                      </>}
                       <label>JVM arguments</label>
                       <input placeholder="-XX:+UseG1GC -XX:MaxGCPauseMillis=50" value={st.jvmArgs} onChange={(e) => set("jvmArgs", e.target.value)} />
                       <label>Game arguments</label>

@@ -13,7 +13,7 @@ type VersionHit = { id: string; name: string; channel: string; game_versions: st
 type Props = {
   inst: Inst | null;
   java: string;
-  javaMode: "system" | "launcher";
+  javaMode: "system" | "custom";
   onPackInstalled: (list: Inst[]) => void;
   active: boolean;
 };

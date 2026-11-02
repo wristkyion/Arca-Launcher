@@ -1066,6 +1066,36 @@ pub fn launch(
             sub("${classpath}", &vars),
         ],
     };
+    
+    // Detect Java version to filter incompatible arguments
+    let java_major = crate::detect_java_major(java).ok();
+    let filtered_jvm: Vec<String> = jvm
+        .into_iter()
+        .filter(|arg| {
+            // --sun-misc-unsafe-memory-access requires Java 17+
+            if arg.starts_with("--sun-misc-unsafe-memory-access") {
+                if java_major.map_or(false, |v| v < 17) {
+                    emit_game_log(
+                        app,
+                        format!("Skipping incompatible JVM arg for Java {}: {}", java_major.unwrap_or(0), arg),
+                    );
+                    return false;
+                }
+            }
+            // --add-modules, --add-opens, --add-exports require Java 9+
+            if arg.starts_with("--add-modules") || arg.starts_with("--add-opens") || arg.starts_with("--add-exports") {
+                if java_major.map_or(false, |v| v < 9) {
+                    emit_game_log(
+                        app,
+                        format!("Skipping incompatible JVM arg for Java {}: {}", java_major.unwrap_or(0), arg),
+                    );
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    
     let game: Vec<String> = match v["arguments"]["game"].as_array() {
         Some(a) => a.iter().flat_map(|x| expand(x, &vars)).collect(),
         None => v["minecraftArguments"]
@@ -1079,13 +1109,41 @@ pub fn launch(
         .as_str()
         .ok_or_else(|| anyhow!("mainClass missing"))?;
 
+    // Detect Java bitness and validate RAM
+    let effective_ram = match crate::detect_java_bitness(java) {
+        Ok(32) if ram > 1500 => {
+            emit_game_log(
+                app,
+                format!(
+                    "Warning: 32-bit Java cannot allocate {ram}MB. Capping at 1500MB. Install 64-bit Java for higher RAM."
+                ),
+            );
+            1500
+        }
+        Ok(64) if ram > 16384 => {
+            emit_game_log(
+                app,
+                format!("Warning: RAM allocation {ram}MB exceeds safe maximum. Capping at 16GB."),
+            );
+            16384
+        }
+        Err(_) if ram > 4096 => {
+            emit_game_log(
+                app,
+                format!("Warning: Could not detect Java bitness. Capping RAM at 4GB for safety."),
+            );
+            4096
+        }
+        _ => ram,
+    };
+
     // user JVM args come after the defaults, so e.g. their own -Xmx wins
     let mut cmd = Command::new(java);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.arg(format!("-Xmx{ram}M"))
+    cmd.arg(format!("-Xmx{effective_ram}M"))
         .args(&acc.jvm)
-        .args(&jvm)
+        .args(&filtered_jvm)
         .args(&o.jvm_args)
         .arg(main_class)
         .args(&game)

@@ -867,6 +867,37 @@ fn detect_java_major(java: &str) -> anyhow::Result<u8> {
     ))
 }
 
+fn detect_java_bitness(java: &str) -> anyhow::Result<u8> {
+    let mut command = Command::new(java);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output = command.arg("-version").output()?;
+    if !output.status.success() {
+        anyhow::bail!("Java version check exited with {}", output.status);
+    }
+    let version_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if version_text.contains("64-Bit") || version_text.contains("64-bit") {
+        Ok(64)
+    } else {
+        Ok(32)
+    }
+}
+
+fn verify_java_executable(java: &str) -> anyhow::Result<()> {
+    let mut command = Command::new(java);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output = command.arg("-version").output()?;
+    if !output.status.success() {
+        anyhow::bail!("Java is not executable or failed to run");
+    }
+    Ok(())
+}
+
 fn launcher_java_path(major: u8) -> PathBuf {
     root_dir()
         .join("jre")
@@ -882,8 +913,16 @@ async fn ensure_launcher_java(app: &AppHandle, mc_version: &str) -> anyhow::Resu
     }
     let major = java_major_for_minecraft(mc_version);
     let java_path = launcher_java_path(major);
+    
+    // Check if already installed and working
     if java_path.is_file() {
-        return Ok(java_path);
+        if verify_java_executable(&java_path.to_string_lossy()).is_ok() {
+            return Ok(java_path);
+        } else {
+            emit(app, format!("Java {major} installation corrupted, re-downloading..."));
+            let install_dir = root_dir().join("jre").join("javaruntime").join(format!("java-{major}"));
+            let _ = std::fs::remove_dir_all(&install_dir);
+        }
     }
 
     let runtime_root = root_dir().join("jre").join("javaruntime");
@@ -929,6 +968,11 @@ async fn ensure_launcher_java(app: &AppHandle, mc_version: &str) -> anyhow::Resu
         if !extracted_java.is_file() {
             anyhow::bail!("Downloaded Java archive did not contain bin/java.exe");
         }
+        
+        emit(app, format!("Verifying Java {major}..."));
+        verify_java_executable(&extracted_java.to_string_lossy())
+            .map_err(|e| anyhow!("Downloaded Java failed verification: {e}"))?;
+        
         let install_dir = runtime_root.join(format!("java-{major}"));
         match std::fs::rename(&staging, &install_dir) {
             Ok(()) => {}
@@ -938,6 +982,12 @@ async fn ensure_launcher_java(app: &AppHandle, mc_version: &str) -> anyhow::Resu
             }
             Err(error) => return Err(error.into()),
         }
+        
+        // Final verification of installed location
+        let final_java = install_dir.join("bin").join("java.exe");
+        verify_java_executable(&final_java.to_string_lossy())
+            .map_err(|e| anyhow!("Installed Java failed final verification: {e}"))?;
+        
         emit(app, format!("Java {major} is ready"));
         Ok::<(), anyhow::Error>(())
     }
@@ -962,47 +1012,38 @@ pub(crate) async fn pick_java(
     mc_version: &str,
 ) -> anyhow::Result<String> {
     let user = user.trim();
-    if !user.is_empty() && user != "java" {
-        if requires_java_8_for_legacy_launchwrapper(mc_version) {
-            let major = detect_java_major(user).map_err(|error| {
-                anyhow!("Could not check the selected Java runtime ({user}): {error}")
-            })?;
-            if major > 8 {
-                anyhow::bail!(
-                    "Minecraft {mc_version} uses an old LaunchWrapper that requires Java 8. The selected Java is {major}; set Custom Java path to a Java 8 runtime or clear that field to use the compatible launcher runtime."
-                );
-            }
-        }
-        return Ok(user.to_string());
-    }
+    
     match runtime_mode {
-        "system" if requires_java_8_for_legacy_launchwrapper(mc_version) => {
-            match detect_java_major("java") {
-                Ok(major) if major <= 8 => return Ok("java".into()),
-                Ok(major) => emit(
-                    app,
-                    format!(
-                        "Minecraft {mc_version} needs Java 8; using a launcher-managed runtime instead of system Java {major}."
-                    ),
-                ),
-                Err(error) => emit(
-                    app,
-                    format!(
-                        "Could not use system Java for Minecraft {mc_version} ({error}); downloading a compatible Java 8 runtime."
-                    ),
-                ),
+        "custom" => {
+            // Custom mode: user must provide Java path from their computer
+            if user.is_empty() || user == "java" {
+                anyhow::bail!("Custom Java mode requires a Java path. Please specify the full path to java.exe in settings.");
             }
+            
+            emit(app, format!("Checking custom Java at {user}..."));
+            verify_java_executable(user)
+                .map_err(|e| anyhow!("Custom Java path ({user}) is not valid or not executable: {e}"))?;
+            
+            if requires_java_8_for_legacy_launchwrapper(mc_version) {
+                let major = detect_java_major(user).map_err(|error| {
+                    anyhow!("Could not check the selected Java runtime ({user}): {error}")
+                })?;
+                if major > 8 {
+                    anyhow::bail!(
+                        "Minecraft {mc_version} uses an old LaunchWrapper that requires Java 8. The selected Java is {major}; select a Java 8 runtime or switch to launcher-managed mode."
+                    );
+                }
+            }
+            Ok(user.to_string())
+        }
+        _ => {
+            // System/launcher mode: auto-download Java to launcher folder
+            // Always check folder first, download if missing or corrupted
             Ok(ensure_launcher_java(app, mc_version)
                 .await?
                 .to_string_lossy()
                 .into_owned())
         }
-        "system" => Ok("java".into()),
-        "launcher" => Ok(ensure_launcher_java(app, mc_version)
-            .await?
-            .to_string_lossy()
-            .into_owned()),
-        other => anyhow::bail!("Unknown Java runtime option: {other}"),
     }
 }
 
@@ -1012,6 +1053,55 @@ async fn download_java_runtime(app: AppHandle, mc_version: String) -> Result<Str
         .await
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(|error| format!("{error:#}"))
+}
+
+#[derive(serde::Serialize)]
+struct JavaInfo {
+    valid: bool,
+    major: Option<u8>,
+    bitness: Option<u8>,
+    error: Option<String>,
+    max_ram_mb: Option<u32>,
+}
+
+#[tauri::command]
+fn check_java_info(java_path: String) -> JavaInfo {
+    let path = java_path.trim();
+    if path.is_empty() || path == "java" {
+        return JavaInfo {
+            valid: false,
+            major: None,
+            bitness: None,
+            error: Some("Specify a Java path".into()),
+            max_ram_mb: None,
+        };
+    }
+
+    match verify_java_executable(path) {
+        Ok(()) => {
+            let major = detect_java_major(path).ok();
+            let bitness = detect_java_bitness(path).ok();
+            let max_ram_mb = match bitness {
+                Some(32) => Some(1500),
+                Some(64) => Some(16384),
+                _ => None,
+            };
+            JavaInfo {
+                valid: true,
+                major,
+                bitness,
+                error: None,
+                max_ram_mb,
+            }
+        }
+        Err(e) => JavaInfo {
+            valid: false,
+            major: None,
+            bitness: None,
+            error: Some(format!("Java not executable: {e}")),
+            max_ram_mb: None,
+        },
+    }
 }
 
 fn new_id() -> String {
@@ -1785,6 +1875,7 @@ fn main() {
             load_theme,
             set_instance_directory,
             download_java_runtime,
+            check_java_info,
             migration::legacy_migration_pending,
             migration::migrate_legacy_instances
         ])

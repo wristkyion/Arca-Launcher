@@ -46,7 +46,7 @@ type InstanceInstallArgs = {
   description: string;
   background: string;
   java: string;
-  javaMode: "system" | "launcher";
+  javaMode: "system" | "custom";
   onInstalled: (instances: CreatedInstance[]) => void;
 };
 
@@ -58,7 +58,7 @@ type StartArgs = {
   icon: string;
   instanceId?: string;
   java: string;
-  javaMode: "system" | "launcher";
+  javaMode: "system" | "custom";
   /** A specific version/file id to install instead of the newest compatible one. */
   versionId?: string;
   onPackInstalled?: (list: Inst[]) => void;
