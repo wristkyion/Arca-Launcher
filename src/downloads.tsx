@@ -192,6 +192,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const scheduledRef = useRef(new Set<string>());
   const timersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => {
+    // Auto-clear disabled - tasks stay until manually removed
     if (!autoClear) {
       timersRef.current.forEach(clearTimeout);
       timersRef.current.clear();
@@ -201,27 +202,8 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
         : ts);
       return;
     }
-    tasks.forEach((t) => {
-      if (t.phase === "done" && !scheduledRef.current.has(t.key)) {
-        scheduledRef.current.add(t.key);
-        const first = setTimeout(() => {
-          timersRef.current.delete(t.key);
-          setTasks((ts) => ts.map((x) => (x.key === t.key ? { ...x, fading: true } : x)));
-          const second = setTimeout(() => {
-            timersRef.current.delete(t.key);
-            dismiss(t.key);
-          }, 280);
-          timersRef.current.set(t.key, second);
-        }, 3200);
-        timersRef.current.set(t.key, first);
-      }
-      if (t.phase !== "done") {
-        scheduledRef.current.delete(t.key);
-        const timer = timersRef.current.get(t.key);
-        if (timer) clearTimeout(timer);
-        timersRef.current.delete(t.key);
-      }
-    });
+    // Disabled: do not auto-remove completed tasks
+    // User must manually click (X) button to remove
   }, [tasks, autoClear]);
 
   useEffect(() => () => {
@@ -365,54 +347,98 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** Floating download tray pinned to the top-right of the window. */
-export function DownloadOverlay() {
+/** Floating download tray pinned to the right side of the window. */
+export function DownloadsFloat() {
   const { tasks, dismiss } = useDownloads();
-  const [open, setOpen] = useState(true);
-  if (tasks.length === 0) return null;
+  const [isOpen, setIsOpen] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+  const prevTaskCountRef = useRef(0);
   const running = tasks.filter((t) => t.phase === "running" || t.phase === "cancelling").length;
   const queued = tasks.filter((t) => t.phase === "queued").length;
+  const hasActiveTasks = running > 0 || queued > 0;
+
+  // Auto-open only when NEW tasks are added (not when panel manually closed)
+  useEffect(() => {
+    const currentCount = tasks.length;
+    // New task appeared - open panel
+    if (currentCount > prevTaskCountRef.current && hasActiveTasks) {
+      setIsOpen(true);
+      setIsClosing(false);
+    }
+    prevTaskCountRef.current = currentCount;
+  }, [tasks.length, hasActiveTasks]);
+
+  const handleClose = () => {
+    setIsClosing(true);
+    setTimeout(() => {
+      setIsOpen(false);
+      setIsClosing(false);
+    }, 300); // Match animation duration
+  };
+
+  // Show toggle button when collapsed and tasks exist
+  if (!isOpen && tasks.length > 0) {
+    return (
+      <button 
+        className="dlftoggle"
+        onClick={() => setIsOpen(true)}
+        title="View tasks"
+      >
+        <span>View Tasks</span>
+        {hasActiveTasks && <span className="dlftoggle-badge">{running || queued}</span>}
+      </button>
+    );
+  }
+
+  if (tasks.length === 0) return null;
 
   return (
-    <div className="dlfloat">
-      <button className="dlfhead" onClick={() => setOpen((o) => !o)}>
-        <span className={"dlfdot" + (running > 0 ? " live" : "")} />
-        <b>{running > 0 ? `Downloading ${running} item${running > 1 ? "s" : ""}${queued ? ` · ${queued} queued` : ""}` : queued ? `${queued} queued` : "Downloads"}</b>
-        <span className="chev">{open ? "▾" : "▸"}</span>
-      </button>
-      {open && (
-        <div className="dlflist">
-          {tasks.map((t) => (
-            <div className={"dlfitem" + (t.fading ? " fading" : "")} key={t.key}>
-              {t.icon
-                ? <img src={t.icon} width={30} height={30} className="micon" alt=""
-                    onError={(e) => e.currentTarget.classList.add("is-hidden")} />
-                : <span className="dlfph" />}
-              <div className="dlfinfo">
-                <b>{t.title}</b>
-                <span className={"dlfstatus " + t.phase}>{t.detail}</span>
-                {t.phase === "running" && (
-                  <div className={"pbar slim" + (t.pct == null ? " indeterminate" : "")}>
-                    <span style={t.pct != null ? { "--progress-width": `${t.pct}%` } as CSSVars : undefined} />
-                  </div>
-                )}
-              </div>
-              {t.phase === "running"
-                ? <>
-                    <span className="dlfpct">{t.pct != null ? `${t.pct}%` : ""}</span>
-                    {t.kind === "mod" && <button className="dlfx" title="Cancel download" aria-label={`Cancel ${t.title} download`} onClick={() => t.cancel?.()}>✕</button>}
-                  </>
-                : t.phase === "cancelling"
-                  ? <span className="dlfpct">Canceling</span>
-                  : t.phase === "queued" && t.kind === "mod"
-                    ? <button className="dlfx" title="Cancel queued download" aria-label={`Cancel queued ${t.title} download`} onClick={() => t.cancel?.()}>✕</button>
-                : t.phase === "error" && t.retry
-                  ? <button className="mini dlfretry" onClick={t.retry}>Retry</button>
-                  : <button className="dlfx" title="Dismiss" onClick={() => dismiss(t.key)}>✕</button>}
-            </div>
-          ))}
+    <div className={"dlfloat" + (isClosing ? " closing" : "")}>
+      <div className="dlfhead">
+        <div className="dlfhead-left">
+          <span className={("dlfdot" + (hasActiveTasks ? " live" : ""))} />
+          <span className="dlfhead-title">Tasks</span>
         </div>
-      )}
+        <button 
+          className="dlfclose-panel" 
+          onClick={handleClose}
+          title="Hide panel"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="dlflist">
+        {tasks.map((t) => (
+          <div className={"dlfitem" + (t.fading ? " fading" : "") + " phase-" + t.phase} key={t.key}>
+            {t.icon
+              ? <img src={t.icon} width={40} height={40} className="dlf-icon" alt=""
+                  onError={(e) => e.currentTarget.classList.add("is-hidden")} />
+              : <span className="dlf-icon-ph" />}
+            <div className="dlfinfo">
+              <div className="dlf-title">{t.title}</div>
+              <div className={"dlf-status status-" + t.phase}>{t.detail}</div>
+              {t.phase === "running" && t.pct != null && (
+                <div className="dlf-progress">
+                  <div className="dlf-progress-bar" style={{ width: `${t.pct}%` }} />
+                </div>
+              )}
+            </div>
+            <div className="dlfactions">
+              {t.phase === "running" && t.pct != null && (
+                <span className="dlf-percent">{t.pct}%</span>
+              )}
+              {(t.phase === "running" || t.phase === "queued") && t.cancel
+                ? <button className="dlf-btn dlf-btn-cancel" onClick={() => t.cancel?.()}>Cancel</button>
+                : t.phase === "error" && t.retry
+                  ? <button className="dlf-btn dlf-btn-retry" onClick={t.retry}>Retry</button>
+                  : null}
+              {(t.phase === "done" || t.phase === "error" || t.phase === "cancelled") && (
+                <button className="dlf-btn-remove" onClick={() => dismiss(t.key)} title="Remove task">✕</button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

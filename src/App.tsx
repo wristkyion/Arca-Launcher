@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import ModsPage from "./mods";
 import ContentPage from "./content";
-import { DownloadsProvider, DownloadOverlay, useDownloads } from "./downloads";
+import { DownloadsProvider, DownloadsFloat, useDownloads } from "./downloads";
 import CrashWatcher from "./CrashWatcher";
 // @ts-ignore CSS is handled by the bundler; TypeScript may not have a CSS module declaration.
 import "./styles.css";
@@ -1875,7 +1875,7 @@ function AppInner() {
         </div>
       )}
 
-      <DownloadOverlay />
+      <DownloadsFloat />
       <CrashWatcher />
     </div>
   );
