@@ -245,6 +245,7 @@ select { width: 100%; padding: 10px 12px; background: var(--panel2); color: inhe
 .clhead { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .clv { font-size: 11px; background: var(--purple); padding: 2px 8px; border-radius: 999px; }
 .cl ul { margin: 6px 0 0; padding-left: 18px; color: var(--mute); font-size: 12px; line-height: 1.6; }
+.cl-section-title { display: block; margin-top: 8px; font-size: 11px; }
 
 /* ---- instances ---- */
 .hero { position: relative; }

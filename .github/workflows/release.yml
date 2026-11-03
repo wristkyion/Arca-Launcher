@@ -40,12 +40,27 @@ jobs:
             throw "Configure the TAURI_SIGNING_PRIVATE_KEY repository Actions secret before publishing."
           }
 
+      - name: Verify publisher build variables
+        shell: pwsh
+        env:
+          ARCA_MICROSOFT_CLIENT_ID: ${{ vars.ARCA_MICROSOFT_CLIENT_ID }}
+          ARCA_CURSEFORGE_PROXY_URL: ${{ vars.ARCA_CURSEFORGE_PROXY_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ARCA_MICROSOFT_CLIENT_ID)) {
+            throw "Configure the ARCA_MICROSOFT_CLIENT_ID repository Actions variable."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:ARCA_CURSEFORGE_PROXY_URL)) {
+            throw "Configure the ARCA_CURSEFORGE_PROXY_URL repository Actions variable."
+          }
+
       - run: npm ci
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          ARCA_MICROSOFT_CLIENT_ID: ${{ vars.ARCA_MICROSOFT_CLIENT_ID }}
+          ARCA_CURSEFORGE_PROXY_URL: ${{ vars.ARCA_CURSEFORGE_PROXY_URL }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Arca Launcher ${{ github.ref_name }}

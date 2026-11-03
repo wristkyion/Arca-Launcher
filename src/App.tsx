@@ -86,7 +86,41 @@ const DEFAULTS: Settings = {
 };
 
 // Edit this list to publish your own launcher changelogs (newest first).
-const CHANGELOG: { v: string; title: string; items: string[] }[] = [
+type ChangelogSection = { title: string; items: string[] };
+type ChangelogEntry =
+  | { v: string; title: string; sections: ChangelogSection[] }
+  | { v: string; title: string; items: string[] };
+
+const CHANGELOG: ChangelogEntry[] = [
+  {
+    v: "0.2.0",
+    title: "Power",
+    sections: [
+      {
+        title: "Features",
+        items: [
+          "Added signed launcher updates with release notes, download progress, signature verification, and user-controlled installation.",
+          "Modpack installs now carry over the pack name, description, icon, and available thumbnail as the instance background.",
+          "Expanded the content browser with grid and list views, richer project details, pagination, and advanced filters.",
+        ],
+      },
+      {
+        title: "Rework",
+        items: [
+          "Refined the downloader layout, project cards, thumbnails, and sticky navigation for browsing content.",
+          "Improved project detail descriptions with formatted Markdown and clearer metadata.",
+        ],
+      },
+      {
+        title: "Fixes and reliability",
+        items: [
+          "Fixed NeoForge detection and installation for modern Minecraft version formats such as 26.x.",
+          "Kept NeoForge availability checks consistent with the shared loader installer.",
+          "Restricted automatic updates to signed releases verified by the launcher's configured public key.",
+        ],
+      },
+    ],
+  },
   {
     v: "0.1.6",
     title: "Rework",
@@ -1572,7 +1606,15 @@ function AppInner() {
                   {CHANGELOG.map((c) => (
                     <div key={c.v} className="cl">
                       <div className="clhead"><span className="clv">v{c.v}</span><b>{c.title}</b></div>
-                      <ul>{c.items.map((it) => <li key={it}>{it}</li>)}</ul>
+                      {"sections" in c
+                        ? c.sections.map((section) => (
+                          <div key={section.title}>
+                            <b className="cl-section-title">{section.title}</b>
+                            <ul>{section.items.map((it) => <li key={it}>{it}</li>)}</ul>
+                          </div>
+                        ))
+                        : <ul>{c.items.map((it) => <li key={it}>{it}</li>)}
+                      </ul>}
                     </div>
                   ))}
                 </section>
