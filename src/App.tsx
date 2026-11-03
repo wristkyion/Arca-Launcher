@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import ModsPage from "./mods";
 import ContentPage from "./content";
 import { DownloadsProvider, DownloadsFloat, useDownloads } from "./downloads";
@@ -19,7 +22,12 @@ type Instance = { id: string; name: string; loader: string; mc: string; version_
 type ThemeInfo = { id: string; name: string; author: string; builtin: boolean };
 type ThemeCatalog = { themes: ThemeInfo[]; warnings: string[] };
 type ThemeStylesheet = { id: string; name: string; author: string; css: string };
-type LauncherUpdateCheck = { current_version: string; latest_version: string; update_available: boolean };
+type LauncherUpdateCheck = {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  notes?: string;
+};
 type MaintenanceAction = "delete_instances" | "delete_java" | "clean_accounts" | "factory_reset";
 const MAINTENANCE_DETAILS: Record<MaintenanceAction, { title: string; description: string }> = {
   delete_instances: {
@@ -537,6 +545,13 @@ function AppInner() {
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateCheck | null>(null);
   const [updateCheckError, setUpdateCheckError] = useState("");
   const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
+  const [updateInstallError, setUpdateInstallError] = useState("");
+  const [updateInstallBusy, setUpdateInstallBusy] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateDownloaded, setUpdateDownloaded] = useState(false);
+  const updateRef = useRef<Update | null>(null);
+  const downloadedBytesRef = useRef(0);
+  const updateSizeRef = useRef<number | null>(null);
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSt((p) => ({ ...p, [k]: v }));
   const [instanceDirectoryDraft, setInstanceDirectoryDraft] = useState("");
   const [instanceDirectoryBusy, setInstanceDirectoryBusy] = useState(false);
@@ -584,14 +599,73 @@ function AppInner() {
   const checkLauncherUpdate = async () => {
     setUpdateCheckBusy(true);
     setUpdateCheckError("");
+    setUpdateInstallError("");
+    setUpdateDownloaded(false);
+    setUpdateProgress(null);
     try {
-      setLauncherUpdate(await invoke<LauncherUpdateCheck>("check_launcher_update"));
+      await updateRef.current?.close();
+      updateRef.current = null;
+      if (import.meta.env.DEV) {
+        setLauncherUpdate(await invoke<LauncherUpdateCheck>("check_launcher_update"));
+      } else {
+        const [currentVersion, update] = await Promise.all([getVersion(), check()]);
+        updateRef.current = update;
+        setLauncherUpdate({
+          current_version: currentVersion,
+          latest_version: update?.version ?? currentVersion,
+          update_available: update !== null,
+          notes: update?.body,
+        });
+      }
     } catch (error) {
       setLauncherUpdate(null);
       setUpdateCheckError(`Could not check for launcher updates: ${error}`);
     } finally {
       setUpdateCheckBusy(false);
       setUpdateCheckComplete(true);
+    }
+  };
+
+  const downloadLauncherUpdate = async () => {
+    const update = updateRef.current;
+    if (!update) return;
+    setUpdateInstallBusy(true);
+    setUpdateInstallError("");
+    setUpdateProgress(0);
+    downloadedBytesRef.current = 0;
+    updateSizeRef.current = null;
+    try {
+      await update.download((event) => {
+        if (event.event === "Started") {
+          updateSizeRef.current = event.data.contentLength ?? null;
+        } else if (event.event === "Progress") {
+          downloadedBytesRef.current += event.data.chunkLength;
+          const total = updateSizeRef.current;
+          setUpdateProgress(total ? Math.min(100, (downloadedBytesRef.current / total) * 100) : null);
+        } else if (event.event === "Finished") {
+          setUpdateProgress(100);
+        }
+      });
+      setUpdateDownloaded(true);
+    } catch (error) {
+      setUpdateInstallError(`Could not download the update: ${error}`);
+      setUpdateProgress(null);
+    } finally {
+      setUpdateInstallBusy(false);
+    }
+  };
+
+  const installLauncherUpdate = async () => {
+    const update = updateRef.current;
+    if (!update || !updateDownloaded) return;
+    setUpdateInstallBusy(true);
+    setUpdateInstallError("");
+    try {
+      await update.install();
+      await relaunch();
+    } catch (error) {
+      setUpdateInstallError(`Could not install the update: ${error}`);
+      setUpdateInstallBusy(false);
     }
   };
 
@@ -2009,10 +2083,10 @@ function AppInner() {
                     </section>
 
                     <section className="setting-card update-setting-card" id="settings-updates">
-                      <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Launcher updates</h3><p>Review release notes and download the latest build.</p></div></div>
+                      <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Launcher updates</h3><p>Check automatically on startup, then choose when to download and install.</p></div></div>
                       <p className={"setting-note" + (launcherUpdate?.update_available ? " update-available" : "")}>
                         {updateCheckBusy
-                          ? "Checking GitHub for the latest release..."
+                          ? "Checking for the latest signed release..."
                           : updateCheckError
                             ? updateCheckError
                             : launcherUpdate?.update_available
@@ -2021,9 +2095,33 @@ function AppInner() {
                                 ? `You’re up to date — version ${launcherUpdate.current_version}.`
                                 : "Update status has not been checked yet."}
                       </p>
-                      <button className="mini" onClick={() => void checkLauncherUpdate()} disabled={updateCheckBusy}>
-                        {updateCheckBusy ? "Checking..." : "Check for updates"}
-                      </button>
+                      {launcherUpdate?.update_available && launcherUpdate.notes && (
+                        <p className="setting-note update-notes">{launcherUpdate.notes}</p>
+                      )}
+                      {updateInstallBusy && (
+                        <p className="setting-note" role="status">
+                          {updateDownloaded ? "Installing update..." : updateProgress === null ? "Downloading update..." : `Downloading update... ${Math.round(updateProgress)}%`}
+                        </p>
+                      )}
+                      {updateDownloaded && !updateInstallBusy && (
+                        <p className="setting-note update-available" role="status">Update downloaded and signature verified. Install when you’re ready.</p>
+                      )}
+                      {updateInstallError && <p className="setting-note setting-error" role="alert">{updateInstallError}</p>}
+                      <div className="update-actions">
+                        {launcherUpdate?.update_available && !updateDownloaded && (
+                          <button className="mini" onClick={() => void downloadLauncherUpdate()} disabled={updateCheckBusy || updateInstallBusy}>
+                            {updateInstallBusy ? "Downloading..." : "Download update"}
+                          </button>
+                        )}
+                        {updateDownloaded && (
+                          <button className="mini" onClick={() => void installLauncherUpdate()} disabled={updateInstallBusy}>
+                            {updateInstallBusy ? "Installing..." : "Install and restart"}
+                          </button>
+                        )}
+                        <button className="mini" onClick={() => void checkLauncherUpdate()} disabled={updateCheckBusy || updateInstallBusy || updateDownloaded}>
+                          {updateCheckBusy ? "Checking..." : "Check for updates"}
+                        </button>
+                      </div>
                     </section>
 
                   </div>

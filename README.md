@@ -121,6 +121,19 @@ npm run tauri build
 
 On Windows, Tauri writes the generated installers under `src-tauri\target\release\bundle\`. Look in the `nsis` and `msi` subfolders for the `.exe` and `.msi` packages. Both installers configure write access for the launcher data folders.
 
+### Publish signed automatic updates
+
+The launcher checks for updates on startup and in Settings. It downloads a release only after the user chooses **Download update**, verifies the Tauri signature, then offers **Install and restart**.
+
+The signing private key is stored outside the repository at `%USERPROFILE%\.tauri\arca-launcher.key`. Before publishing:
+
+1. Back up this key securely. Never commit it or share it in chat.
+2. In the GitHub repository, open **Settings → Secrets and variables → Actions** and create the `TAURI_SIGNING_PRIVATE_KEY` secret with the contents of that file.
+3. Keep the matching public key in `src-tauri\tauri.conf.json`; it is safe to publish.
+4. Update both `version` fields in `src-tauri\Cargo.toml` and `src-tauri\tauri.conf.json` to the release version, then push a matching semantic-version tag (for example, `0.1.7`).
+
+The Windows release workflow builds signed NSIS/MSI installers and publishes the updater manifest with the GitHub Release. Existing installs must first be upgraded manually to a build containing the updater; earlier builds cannot self-update.
+
 Useful checks:
 
 ```powershell

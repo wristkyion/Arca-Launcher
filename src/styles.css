@@ -1520,6 +1520,8 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .setting-note.update-available { color: #a7e68a; }
 .setting-card > .btn { width: auto; align-self: flex-start; padding: 9px 13px; font-size: 10px; }
 .update-setting-card { justify-content: flex-start; }
+.update-notes { white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .update-release-button { display: flex; align-items: center; gap: 9px; }
 .update-release-button span { font-size: 13px; }
 .folder-picker-row { display: flex; align-items: center; gap: 8px; min-width: 0; }

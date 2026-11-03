@@ -2052,6 +2052,8 @@ fn close_window(window: tauri::Window) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let main = app
                 .get_webview_window("main")

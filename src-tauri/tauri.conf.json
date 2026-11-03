@@ -19,6 +19,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "windows": {
       "nsis": {
@@ -32,6 +33,17 @@
         "componentGroupRefs": [
           "ArcaLauncherWritableDataFolders"
         ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBM0U0RDNFMEQzNzNCREUKUldUZU96Y05QazArV3VKTHZGYm1acy9QOWdneDRXcTdOcVFYd3ZBUVJIOGszWmsxSExtdnMwVEYK",
+      "endpoints": [
+        "https://github.com/wristkyion/Arca-Launcher/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }
