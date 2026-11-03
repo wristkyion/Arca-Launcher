@@ -4,6 +4,33 @@ use std::path::{Path, PathBuf};
 
 pub const META_FILE: &str = "instances.json";
 
+pub struct InstallDirectory {
+    path: PathBuf,
+}
+
+impl InstallDirectory {
+    pub fn new(path: PathBuf) -> Result<Self, String> {
+        std::fs::create_dir(&path)
+            .map_err(|error| format!("Could not create temporary instance folder: {error}"))?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn commit(self, destination: &Path) -> Result<(), String> {
+        std::fs::rename(&self.path, destination)
+            .map_err(|error| format!("Could not finish installing the instance: {error}"))
+    }
+}
+
+impl Drop for InstallDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// One Minecraft instance, as the rest of the app and the frontend see it. The folder's own
 /// name under the instances directory is this instance's identity (`id`) - it's filled in when
 /// the folder is read, and is never itself stored inside that folder's instances.json.

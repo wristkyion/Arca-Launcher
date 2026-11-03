@@ -9,9 +9,16 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 const METADATA_FILE: &str = "installed-content.json";
+/// Per-file cache of what we parsed out of a mod jar / resource pack zip (display
+/// name, description, embedded icon) so `list()` doesn't have to re-open and
+/// re-unzip every file on every call. Keyed by file size + modified time, so an
+/// edited/replaced file is reparsed automatically. Separate from
+/// `installed-content.json`, which is install provenance, not parsed display data.
+const CACHE_FILE: &str = "content-cache.json";
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct ContentMetadata {
@@ -61,6 +68,45 @@ fn safe_file(name: &str) -> Result<()> {
 
 fn metadata_path(inst_dir: &Path) -> PathBuf {
     inst_dir.join(METADATA_FILE)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ParsedCacheEntry {
+    size: u64,
+    modified_secs: u64,
+    name: String,
+    description: String,
+    icon: String,
+}
+
+type ParsedCache = HashMap<String, HashMap<String, ParsedCacheEntry>>;
+
+fn cache_path(inst_dir: &Path) -> PathBuf {
+    inst_dir.join(CACHE_FILE)
+}
+
+fn load_cache(inst_dir: &Path) -> ParsedCache {
+    let path = cache_path(inst_dir);
+    match fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_cache(inst_dir: &Path, cache: &ParsedCache) {
+    // Best-effort: a cache we can't write just means the next call re-parses.
+    if let Ok(bytes) = serde_json::to_vec(cache) {
+        let _ = fs::write(cache_path(inst_dir), bytes);
+    }
+}
+
+fn modified_secs(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn canonical_name(file_name: &str) -> &str {
@@ -259,9 +305,14 @@ fn mod_metadata(path: &Path) -> (String, String, String) {
 
 pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
     let folder = folder_path(inst_dir, kind)?;
+    let folder_key = folder_name(kind)?;
     let metadata = load_metadata(inst_dir)?
-        .remove(folder_name(kind)?)
+        .remove(folder_key)
         .unwrap_or_default();
+    let mut cache = load_cache(inst_dir);
+    let mut folder_cache = cache.remove(folder_key).unwrap_or_default();
+    let mut cache_dirty = false;
+
     let mut out = vec![];
     let rd = match fs::read_dir(&folder) {
         Ok(rd) => rd,
@@ -285,32 +336,55 @@ pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
         }
         let enabled = !lower.ends_with(".disabled");
         let original_name = canonical_name(&file_name);
-        let size = entry.metadata()?.len();
+        let fmeta = entry.metadata()?;
+        let size = fmeta.len();
+        let mtime = modified_secs(&fmeta);
         let saved = metadata.get(original_name).cloned().unwrap_or_default();
-        let mut name = saved.project_name.clone();
-        let mut description = String::new();
+
+        // Reuse what we already parsed out of this exact file (by size + mtime)
+        // instead of reopening and re-unzipping it on every listing — this is
+        // what keeps a 50+ item mods/resourcepacks folder from locking up the UI.
+        let cached = folder_cache
+            .get(original_name)
+            .filter(|c| c.size == size && c.modified_secs == mtime);
+
+        let (parsed_name, description, parsed_icon) = if let Some(cached) = cached {
+            (cached.name.clone(), cached.description.clone(), cached.icon.clone())
+        } else {
+            let parsed = if kind == "mods" && original_name.to_lowercase().ends_with(".jar") {
+                let (mod_name, mod_description, mod_icon) = mod_metadata(&path);
+                (mod_name, mod_description, mod_icon)
+            } else if kind != "mods" && original_name.to_lowercase().ends_with(".zip") {
+                let (pack_description, pack_icon) = pack_metadata(&path);
+                let pack_name = String::new();
+                (pack_name, pack_description, pack_icon)
+            } else {
+                (String::new(), String::new(), String::new())
+            };
+            folder_cache.insert(
+                original_name.to_string(),
+                ParsedCacheEntry {
+                    size,
+                    modified_secs: mtime,
+                    name: parsed.0.clone(),
+                    description: parsed.1.clone(),
+                    icon: parsed.2.clone(),
+                },
+            );
+            cache_dirty = true;
+            parsed
+        };
+
+        let mut name = if saved.project_name.is_empty() { parsed_name } else { saved.project_name.clone() };
         let mut icon = saved.icon.clone();
-        if kind == "mods" && original_name.to_lowercase().ends_with(".jar") {
-            let (mod_name, mod_description, mod_icon) = mod_metadata(&path);
-            if name.is_empty() {
-                name = mod_name;
-            }
-            description = mod_description;
-            if icon.is_empty() {
-                icon = mod_icon;
-            }
-        } else if kind != "mods" && original_name.to_lowercase().ends_with(".zip") {
-            let (pack_description, pack_icon) = pack_metadata(&path);
-            description = pack_description;
-            if !pack_icon.is_empty() {
-                icon = pack_icon;
-            }
-            if name.is_empty() {
-                name = original_name
-                    .strip_suffix(".zip")
-                    .unwrap_or(original_name)
-                    .to_string();
-            }
+        if icon.is_empty() {
+            icon = parsed_icon;
+        }
+        if kind != "mods" && name.is_empty() {
+            name = original_name
+                .strip_suffix(".zip")
+                .unwrap_or(original_name)
+                .to_string();
         }
         if name.is_empty() {
             name = original_name
@@ -331,6 +405,16 @@ pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
             description,
         });
     }
+
+    if cache_dirty {
+        // Drop entries for files that no longer exist so the cache doesn't grow forever.
+        let present: std::collections::HashSet<&str> =
+            out.iter().map(|item| canonical_name(&item.file_name)).collect();
+        folder_cache.retain(|name, _| present.contains(name.as_str()));
+        cache.insert(folder_key.to_string(), folder_cache);
+        save_cache(inst_dir, &cache);
+    }
+
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }

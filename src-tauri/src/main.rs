@@ -21,9 +21,10 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::watch;
 
 pub fn emit(app: &AppHandle, msg: impl Into<String>) {
     let message = msg.into();
@@ -40,12 +41,80 @@ tokio::task_local! {
     static INSTALL_TASK_ID: String;
 }
 
+static ACTIVE_INSTALLS: OnceLock<Mutex<std::collections::HashMap<String, watch::Sender<bool>>>> =
+    OnceLock::new();
+
+fn active_installs() -> &'static Mutex<std::collections::HashMap<String, watch::Sender<bool>>> {
+    ACTIVE_INSTALLS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn wait_for_install_cancel(mut cancelled: watch::Receiver<bool>) {
+    loop {
+        if *cancelled.borrow() || cancelled.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 pub async fn with_install_task<F: Future>(task_id: String, future: F) -> F::Output {
     if task_id.trim().is_empty() {
         future.await
     } else {
         INSTALL_TASK_ID.scope(task_id, future).await
     }
+}
+
+pub async fn with_cancellable_install<F, T>(task_id: String, future: F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    if task_id.trim().is_empty() {
+        return with_install_task(task_id, future).await;
+    }
+
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    {
+        let mut active = active_installs()
+            .lock()
+            .map_err(|_| anyhow!("Install task registry is unavailable"))?;
+        if active.contains_key(&task_id) {
+            anyhow::bail!("An install with this task ID is already running");
+        }
+        active.insert(task_id.clone(), cancel_tx);
+    }
+
+    let result = tokio::select! {
+        biased;
+        result = with_install_task(task_id.clone(), future) => result,
+        _ = wait_for_install_cancel(cancel_rx) => Err(anyhow!("Download cancelled")),
+    };
+
+    active_installs()
+        .lock()
+        .map_err(|_| anyhow!("Install task registry is unavailable"))?
+        .remove(&task_id);
+    result
+}
+
+#[tauri::command]
+async fn cancel_download(task_id: String) -> Result<(), String> {
+    for attempt in 0..5 {
+        if let Some(cancel) = active_installs()
+            .lock()
+            .map_err(|_| "Install task registry is unavailable".to_string())?
+            .get(&task_id)
+        {
+            cancel.send_replace(true);
+            return Ok(());
+        }
+        if mods::cancel_mod_install(task_id.clone()).is_ok() {
+            return Ok(());
+        }
+        if attempt < 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    Err("This download is no longer active".into())
 }
 
 pub fn emit_game_log(app: &AppHandle, msg: impl Into<String>) {
@@ -1125,8 +1194,17 @@ fn instance_dir(id: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn list_content(req: ContentReq) -> Result<Vec<content::ContentItem>, String> {
-    content::list(&instance_dir(&req.instance)?, &req.kind).map_err(|e| format!("{e:#}"))
+async fn list_content(req: ContentReq) -> Result<Vec<content::ContentItem>, String> {
+    // A non-async command runs on the main thread; with 50+ mods/packs that means
+    // unzipping every file (and base64-encoding any embedded icon) would block the
+    // whole window. Doing the work in a blocking thread keeps the UI responsive —
+    // content::list() also caches what it parses per file, so repeat calls on an
+    // unchanged library are cheap regardless.
+    let dir = instance_dir(&req.instance)?;
+    tauri::async_runtime::spawn_blocking(move || content::list(&dir, &req.kind))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[derive(Deserialize)]
@@ -1712,7 +1790,7 @@ struct CreateReq {
 #[tauri::command]
 async fn create_instance(app: AppHandle, req: CreateReq) -> Result<Vec<Instance>, String> {
     let task_id = req.task_id.clone();
-    with_install_task(task_id, create(app, req))
+    with_cancellable_install(task_id, create(app, req))
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -1724,6 +1802,7 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
     }
     let (dir, _, _cfg) = setup_dirs();
     let instance_root = instance_root().map_err(|error| anyhow!(error))?;
+    std::fs::create_dir_all(&instance_root)?;
     let c = game::http();
     let java = pick_java(&app, &req.java, &req.java_mode, &req.mc).await?;
 
@@ -1739,12 +1818,17 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
         id = format!("{base}-{n}");
         n += 1;
     }
-    let inst_dir = instance_root.join(&id);
-    game::install_deps(&app, &c, &dir, &version_id, &v, &inst_dir).await?;
-    game::prepare_instance(&inst_dir)?;
+    let destination = instance_root.join(&id);
+    let staged = instances::InstallDirectory::new(
+        instance_root.join(format!(".install-{}", uuid::Uuid::new_v4().simple())),
+    )
+    .map_err(|error| anyhow!(error))?;
+    let inst_dir = staged.path();
+    game::install_deps(&app, &c, &dir, &version_id, &v, inst_dir).await?;
+    game::prepare_instance(inst_dir)?;
 
     let background =
-        instances::save_background(&inst_dir, &req.background).map_err(|e| anyhow!(e))?;
+        instances::save_background(inst_dir, &req.background).map_err(|e| anyhow!(e))?;
     let instance = Instance {
         id: id.clone(),
         name,
@@ -1755,7 +1839,8 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
         description: req.description,
         background,
     };
-    instances::write_one(&inst_dir, &instance).map_err(|e| anyhow!(e))?;
+    instances::write_one(inst_dir, &instance).map_err(|e| anyhow!(e))?;
+    staged.commit(&destination).map_err(|error| anyhow!(error))?;
     emit(&app, "Instance ready");
 
     let mut list = instances::scan_all(&instance_root);
@@ -1868,6 +1953,7 @@ fn main() {
             load_instance_background,
             loader_support,
             create_instance,
+            cancel_download,
             edit_instance,
             remove_instance,
             list_accounts,

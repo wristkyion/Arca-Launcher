@@ -463,6 +463,10 @@ function AppInner() {
   const [showCrashReports, setShowCrashReports] = useState(true);
 
   const [busy, setBusy] = useState(false);
+  // True once the Minecraft process has actually been spawned (not just while
+  // checking assets/libraries/Java) and until it exits. Keeps Launch disabled
+  // for the whole play session instead of just the pre-launch checks.
+  const [gameRunning, setGameRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [activityLog, setActivityLog] = useState<string[]>([]);
   const [msCode, setMsCode] = useState<{ code: string; url: string } | null>(null);
@@ -572,7 +576,11 @@ function AppInner() {
     loadVersions();
     invoke<number>("system_ram").then(setSysRam).catch(() => {});
     const subs = [
-      listen<string>("progress", (e) => add(e.payload)),
+      listen<string>("progress", (e) => {
+        add(e.payload);
+        // Emitted from the backend once the spawned Minecraft process exits.
+        if (/^Game exited/.test(e.payload)) setGameRunning(false);
+      }),
       listen<string>("game-log", (e) => addGameLog(e.payload)),
       listen<{ code: string; url: string }>("ms-code", (e) => setMsCode(e.payload)),
     ];
@@ -772,6 +780,10 @@ function AppInner() {
         },
       });
       add("Game started.");
+      // The backend's `play` command returns once the process is spawned (right
+      // after the asset/library/Java checks), not when the game exits — so this
+      // is the moment to switch from "busy/checking" to "the instance is running".
+      setGameRunning(true);
     } catch (e) {
       add(`ERROR: ${e}`);
       setPage("console");
@@ -1295,10 +1307,10 @@ function AppInner() {
                   <p>{inst ? (inst.description || BLURB[inst.loader]) : "Download a Minecraft version to get started."}</p>
 
                   <div className="launchrow">
-                    <button className="launch" disabled={busy}
+                    <button className={"launch" + (gameRunning ? " is-running" : "")} disabled={busy || gameRunning}
                       onClick={!current ? () => setPage("account") : !inst ? newInstance : play}>
-                      <b>{busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
-                      <small>{busy ? status.slice(0, 34) : !current ? "You need an account to play" : !inst ? "Download a version first" : `${inst.name} · ${KIND_LABEL[current.kind]}`}</small>
+                      <b>{gameRunning ? "RUNNING" : busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
+                      <small>{gameRunning ? "The instance is running right now" : busy ? status.slice(0, 34) : !current ? "You need an account to play" : !inst ? "Download a version first" : `${inst.name} · ${KIND_LABEL[current.kind]}`}</small>
                       {busy && progress && <span className="bar" style={{ "--progress-width": `${progress.pct}%` } as CSSVars} />}
                     </button>
                   </div>

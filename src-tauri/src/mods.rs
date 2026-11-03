@@ -576,6 +576,7 @@ async fn download_mod_file(
             "{file_name}.{}.part",
             uuid::Uuid::new_v4().simple()
         ));
+        let _partial_download = PartialDownload(temporary.clone());
         let attempt_result: Result<(u64, Option<u64>)> = async {
             let response = tokio::select! {
                 _ = wait_for_cancel(context.cancelled.clone()) => return Err(anyhow!("Download cancelled")),
@@ -634,6 +635,14 @@ async fn download_mod_file(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("Download failed: {url}")))
+}
+
+struct PartialDownload(PathBuf);
+
+impl Drop for PartialDownload {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 #[tauri::command]
@@ -769,6 +778,8 @@ pub struct ContentInstallReq {
     pub instance: String,
     #[serde(default)]
     pub version_id: Option<String>,
+    #[serde(default)]
+    pub task_id: String,
 }
 
 #[tauri::command]
@@ -776,7 +787,7 @@ pub async fn content_install(
     app: AppHandle,
     req: ContentInstallReq,
 ) -> Result<Vec<InstalledFile>, String> {
-    install_content(app, req)
+    crate::with_cancellable_install(req.task_id.clone(), install_content(app, req))
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -878,7 +889,13 @@ async fn install_content(app: AppHandle, req: ContentInstallReq) -> Result<Vec<I
         ));
     }
     emit(&app, format!("Downloading {file_name}"));
-    game::download(&c, &url, &target.join(&file_name)).await?;
+    let (_cancel_tx, cancelled) = watch::channel(false);
+    let context = ModInstallContext {
+        task_id: req.task_id.clone(),
+        cancelled,
+        downloaded_files: Arc::new(Mutex::new(Vec::new())),
+    };
+    download_mod_file(&app, &c, &url, &target.join(&file_name), &context).await?;
     content::record(
         &instance_dir,
         folder,
@@ -1173,7 +1190,7 @@ fn default_java_runtime() -> String {
 #[tauri::command]
 pub async fn modpack_install(app: AppHandle, req: PackReq) -> Result<Vec<Instance>, String> {
     let task_id = req.task_id.clone();
-    crate::with_install_task(task_id, pack(app, req))
+    crate::with_cancellable_install(task_id, pack(app, req))
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -1338,6 +1355,7 @@ fn extract_overrides(archive: &Path, prefixes: &[String], inst: &Path) -> Result
 async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     let (dir, launcher, _cfg) = crate::setup_dirs();
     let instance_root = crate::instance_root().map_err(|error| anyhow!("{error}"))?;
+    fs::create_dir_all(&instance_root)?;
     let c = game::http();
     let name = req.name.trim().to_string();
     if name.is_empty() {
@@ -1357,7 +1375,13 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     let archive = cache.join(&fname);
     let _ = fs::remove_file(&archive);
     emit(&app, format!("Downloading {fname}"));
-    game::download(&c, &url, &archive).await?;
+    let (_cancel_tx, cancelled) = watch::channel(false);
+    let download_context = ModInstallContext {
+        task_id: req.task_id.clone(),
+        cancelled,
+        downloaded_files: Arc::new(Mutex::new(Vec::new())),
+    };
+    download_mod_file(&app, &c, &url, &archive, &download_context).await?;
 
     // 2. read what the pack needs
     let plan = read_plan(&req.source, &archive)?;
@@ -1379,9 +1403,14 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
         id = format!("{base}-{n}");
         n += 1;
     }
-    let inst = instance_root.join(&id);
-    game::install_deps(&app, &c, &dir, &version_id, &v, &inst).await?;
-    game::prepare_instance(&inst)?;
+    let destination = instance_root.join(&id);
+    let staged = instances::InstallDirectory::new(
+        instance_root.join(format!(".install-{}", uuid::Uuid::new_v4().simple())),
+    )
+    .map_err(|error| anyhow!(error))?;
+    let inst = staged.path();
+    game::install_deps(&app, &c, &dir, &version_id, &v, inst).await?;
+    game::prepare_instance(inst)?;
 
     // 4. the pack's own files (mods, ...)
     let mut jobs: Vec<(String, PathBuf)> = vec![];
@@ -1446,7 +1475,7 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     }
 
     // 5. config files, resource packs etc. shipped inside the pack
-    extract_overrides(&archive, &plan.overrides, &inst)?;
+    extract_overrides(&archive, &plan.overrides, inst)?;
 
     let instance = Instance {
         id: id.clone(),
@@ -1458,7 +1487,8 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
         description: String::new(),
         background: String::new(),
     };
-    instances::write_one(&inst, &instance).map_err(|e| anyhow!("{e}"))?;
+    instances::write_one(inst, &instance).map_err(|e| anyhow!("{e}"))?;
+    staged.commit(&destination).map_err(|error| anyhow!(error))?;
     emit(&app, "Instance ready");
     let mut list = instances::scan_all(&instance_root);
     list.retain(|i| i.id != id);

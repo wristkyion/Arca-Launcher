@@ -177,6 +177,12 @@ export default function ContentPage({
 
         {err && <div className="err">{err}</div>}
         {loading && items.length === 0 && <div className="library-loading">Loading installed {selectedKind.label.toLowerCase()}...</div>}
+        {loading && items.length > 0 && (
+          <div className="library-loading-bar" role="status">
+            <span className="library-loading-spinner" aria-hidden="true" />
+            Loading {selectedKind.label.toLowerCase()} list...
+          </div>
+        )}
         {!loading && !err && items.length === 0 && (
           <div className="library-empty">
             <div className="library-empty-icon">{kind === "mods" ? "✦" : kind === "resourcepacks" ? "▧" : "✧"}</div>
