@@ -68,11 +68,6 @@ This project is still in early development, so some features may be incomplete, 
 - Kept NeoForge version availability checks consistent with the installer.
 - Automatic updates accept only releases verified with the launcher's configured signing key.
 
-### v0.1.6 — Rework
-
-- Refreshed the launcher logo, startup animations, title bar, and task panel.
-- Improved Java runtime reliability and general performance.
-
 ## Install a release
 
 1. Open [Arca Launcher releases](https://github.com/wristkyion/Arca-Launcher/releases).
