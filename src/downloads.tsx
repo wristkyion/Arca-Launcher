@@ -57,6 +57,8 @@ type StartArgs = {
   id: string;
   title: string;
   icon: string;
+  description?: string;
+  backgroundUrl?: string;
   instanceId?: string;
   java: string;
   javaMode: "system" | "custom";
@@ -259,7 +261,17 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
           patch(key, { phase: "done", detail: msg, files });
         } else {
           const list = await invoke<Inst[]>("modpack_install", {
-            req: { source: a.source, id: a.id, name: a.title, java: a.java || "java", java_mode: a.javaMode, task_id: key },
+            req: {
+              source: a.source,
+              id: a.id,
+              name: a.title,
+              icon: a.icon,
+              description: a.description ?? "",
+              thumbnail_url: a.backgroundUrl ?? "",
+              java: a.java || "java",
+              java_mode: a.javaMode,
+              task_id: key,
+            },
           });
           setDone((d) => ({ ...d, [key]: [] }));
           patch(key, { phase: "done", detail: "Instance created", pct: 100 });

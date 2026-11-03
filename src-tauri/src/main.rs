@@ -675,6 +675,116 @@ fn save_settings(data: Value) -> Result<(), String> {
         .map_err(|e| format!("Could not write settings: {e}"))
 }
 
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not remove {}: {error}", path.display())),
+    }
+}
+
+fn delete_all_instance_folders(root: &Path) -> Result<usize, String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("Could not list instance folder: {error}")),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Could not inspect instance folder: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = entry.path();
+        if instances::read_one(&path)?.is_some() {
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                format!("Could not delete instance {}: {error}", path.display())
+            })?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn delete_launcher_java(root: &Path) -> Result<(), String> {
+    let java_root = root.join("jre");
+    let runtime_dir = java_root.join("javaruntime");
+    match std::fs::symlink_metadata(&java_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("Refusing to delete Java files through an unexpected jre path".into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Could not inspect launcher Java folder: {error}")),
+    }
+    match std::fs::symlink_metadata(&runtime_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err("Refusing to delete an unexpected launcher Java path".into())
+        }
+        Ok(_) => std::fs::remove_dir_all(&runtime_dir)
+            .map_err(|error| format!("Could not delete launcher Java runtimes: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not inspect launcher Java runtimes: {error}")),
+    }
+}
+
+fn perform_maintenance(
+    action: &str,
+    instance_root: &Path,
+    root: &Path,
+    config: &Path,
+) -> Result<String, String> {
+    match action {
+        "delete_instances" => {
+            let count = delete_all_instance_folders(instance_root)?;
+            Ok(format!("Deleted {count} instance(s)."))
+        }
+        "delete_java" => {
+            delete_launcher_java(root)?;
+            Ok(
+                "Deleted launcher-managed Java runtimes. System and custom Java were not changed."
+                    .into(),
+            )
+        }
+        "clean_accounts" => {
+            remove_file_if_present(&config.join("accounts.json"))?;
+            Ok("Removed saved accounts.".into())
+        }
+        "factory_reset" => {
+            let count = delete_all_instance_folders(instance_root)?;
+            delete_launcher_java(root)?;
+            remove_file_if_present(&config.join("accounts.json"))?;
+            remove_file_if_present(&config.join("settings.json"))?;
+            Ok(format!(
+                "Factory reset complete. Deleted {count} instance(s), launcher-managed Java, saved accounts, and settings. Shared game assets were kept."
+            ))
+        }
+        _ => Err("Unknown maintenance action".into()),
+    }
+}
+
+#[tauri::command]
+async fn run_maintenance_action(action: String) -> Result<String, String> {
+    if !matches!(
+        action.as_str(),
+        "delete_instances" | "delete_java" | "clean_accounts" | "factory_reset"
+    ) {
+        return Err("Unknown maintenance action".into());
+    }
+    let instance_root = instance_root()?;
+    let root = root_dir();
+    let config = setup_dirs().2;
+    tauri::async_runtime::spawn_blocking(move || {
+        perform_maintenance(&action, &instance_root, &root, &config)
+    })
+    .await
+    .map_err(|error| format!("Maintenance task failed: {error}"))?
+}
+
 pub(crate) fn instance_root() -> Result<PathBuf, String> {
     let (game, _, cfg) = setup_dirs();
     let settings_path = cfg.join("settings.json");
@@ -982,14 +1092,20 @@ async fn ensure_launcher_java(app: &AppHandle, mc_version: &str) -> anyhow::Resu
     }
     let major = java_major_for_minecraft(mc_version);
     let java_path = launcher_java_path(major);
-    
+
     // Check if already installed and working
     if java_path.is_file() {
         if verify_java_executable(&java_path.to_string_lossy()).is_ok() {
             return Ok(java_path);
         } else {
-            emit(app, format!("Java {major} installation corrupted, re-downloading..."));
-            let install_dir = root_dir().join("jre").join("javaruntime").join(format!("java-{major}"));
+            emit(
+                app,
+                format!("Java {major} installation corrupted, re-downloading..."),
+            );
+            let install_dir = root_dir()
+                .join("jre")
+                .join("javaruntime")
+                .join(format!("java-{major}"));
             let _ = std::fs::remove_dir_all(&install_dir);
         }
     }
@@ -1081,18 +1197,19 @@ pub(crate) async fn pick_java(
     mc_version: &str,
 ) -> anyhow::Result<String> {
     let user = user.trim();
-    
+
     match runtime_mode {
         "custom" => {
             // Custom mode: user must provide Java path from their computer
             if user.is_empty() || user == "java" {
                 anyhow::bail!("Custom Java mode requires a Java path. Please specify the full path to java.exe in settings.");
             }
-            
+
             emit(app, format!("Checking custom Java at {user}..."));
-            verify_java_executable(user)
-                .map_err(|e| anyhow!("Custom Java path ({user}) is not valid or not executable: {e}"))?;
-            
+            verify_java_executable(user).map_err(|e| {
+                anyhow!("Custom Java path ({user}) is not valid or not executable: {e}")
+            })?;
+
             if requires_java_8_for_legacy_launchwrapper(mc_version) {
                 let major = detect_java_major(user).map_err(|error| {
                     anyhow!("Could not check the selected Java runtime ({user}): {error}")
@@ -1787,6 +1904,17 @@ struct CreateReq {
     task_id: String,
 }
 
+const MAX_INSTANCE_DESCRIPTION_CHARS: usize = 1200;
+
+fn validate_instance_description(description: &str) -> Result<(), String> {
+    if description.chars().count() > MAX_INSTANCE_DESCRIPTION_CHARS {
+        return Err(format!(
+            "Instance descriptions cannot exceed {MAX_INSTANCE_DESCRIPTION_CHARS} characters"
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn create_instance(app: AppHandle, req: CreateReq) -> Result<Vec<Instance>, String> {
     let task_id = req.task_id.clone();
@@ -1800,6 +1928,7 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
     if name.is_empty() {
         anyhow::bail!("Give the instance a name");
     }
+    validate_instance_description(&req.description).map_err(|error| anyhow!(error))?;
     let (dir, _, _cfg) = setup_dirs();
     let instance_root = instance_root().map_err(|error| anyhow!(error))?;
     std::fs::create_dir_all(&instance_root)?;
@@ -1840,7 +1969,9 @@ async fn create(app: AppHandle, req: CreateReq) -> anyhow::Result<Vec<Instance>>
         background,
     };
     instances::write_one(inst_dir, &instance).map_err(|e| anyhow!(e))?;
-    staged.commit(&destination).map_err(|error| anyhow!(error))?;
+    staged
+        .commit(&destination)
+        .map_err(|error| anyhow!(error))?;
     emit(&app, "Instance ready");
 
     let mut list = instances::scan_all(&instance_root);
@@ -1867,6 +1998,7 @@ fn edit_instance(req: EditReq) -> Result<Vec<Instance>, String> {
     if name.is_empty() {
         return Err("The name can't be empty".into());
     }
+    validate_instance_description(&req.description)?;
     let background = instances::save_background(&dir, &req.background)?;
     instance.name = name.to_string();
     instance.icon = req.icon;
@@ -1962,7 +2094,9 @@ fn main() {
             select_account,
             get_skin,
             mods::mod_search,
+            mods::mod_game_versions,
             mods::mod_versions,
+            mods::mod_project_details,
             mods::mod_install,
             mods::cancel_mod_install,
             mods::content_install,
@@ -1976,6 +2110,7 @@ fn main() {
             finish_startup,
             load_settings,
             save_settings,
+            run_maintenance_action,
             list_themes,
             load_theme,
             set_instance_directory,
@@ -2049,6 +2184,129 @@ mod launcher_update_tests {
         assert!(!version_is_newer("0.1.2", "0.1.2"));
         assert!(!version_is_newer("0.1.1", "0.1.2"));
         assert!(!version_is_newer("not-a-version", "0.1.2"));
+    }
+}
+
+#[cfg(test)]
+mod instance_description_tests {
+    use super::validate_instance_description;
+
+    #[test]
+    fn enforces_description_limit_without_rejecting_multibyte_characters() {
+        assert!(validate_instance_description(&"a".repeat(1200)).is_ok());
+        assert!(validate_instance_description(&"a".repeat(1201)).is_err());
+        assert!(validate_instance_description(&"界".repeat(1200)).is_ok());
+        assert!(validate_instance_description("first line\n  second line").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::{delete_all_instance_folders, delete_launcher_java, perform_maintenance};
+    use crate::instances::{self, Instance};
+    use std::{fs, path::PathBuf};
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "arca-launcher-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn deletes_recognized_instances_and_keeps_unrelated_folders() {
+        let root = temp_root("maintenance-instances");
+        let instance_dir = root.join("my-instance");
+        fs::create_dir_all(instance_dir.join("saves")).unwrap();
+        instances::write_one(
+            &instance_dir,
+            &Instance {
+                id: "my-instance".into(),
+                name: "My instance".into(),
+                loader: "vanilla".into(),
+                mc: "1.21".into(),
+                version_id: "1.21".into(),
+                icon: String::new(),
+                description: String::new(),
+                background: String::new(),
+            },
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("unrelated")).unwrap();
+        fs::write(root.join("unrelated/keep.txt"), "keep").unwrap();
+
+        assert_eq!(delete_all_instance_folders(&root).unwrap(), 1);
+        assert!(!instance_dir.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("unrelated/keep.txt")).unwrap(),
+            "keep"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deletes_only_launcher_managed_java() {
+        let root = temp_root("maintenance-java");
+        let runtimes = root.join("jre").join("javaruntime");
+        fs::create_dir_all(runtimes.join("java-21")).unwrap();
+        fs::write(runtimes.join("java-21/java.exe"), "runtime").unwrap();
+        fs::write(root.join("custom-java.txt"), "keep").unwrap();
+
+        delete_launcher_java(&root).unwrap();
+
+        assert!(!runtimes.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("custom-java.txt")).unwrap(),
+            "keep"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn factory_reset_keeps_shared_assets_and_launcher_files() {
+        let root = temp_root("maintenance-reset");
+        let instances_root = root.join("game").join("instances");
+        let instance_dir = instances_root.join("my-instance");
+        let config = root.join("launcher").join("config");
+        fs::create_dir_all(instance_dir.join("saves")).unwrap();
+        instances::write_one(
+            &instance_dir,
+            &Instance {
+                id: "my-instance".into(),
+                name: "My instance".into(),
+                loader: "vanilla".into(),
+                mc: "1.21".into(),
+                version_id: "1.21".into(),
+                icon: String::new(),
+                description: String::new(),
+                background: String::new(),
+            },
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("jre/javaruntime/java-21")).unwrap();
+        fs::write(root.join("jre/javaruntime/java-21/java.exe"), "runtime").unwrap();
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("accounts.json"), "{}").unwrap();
+        fs::write(config.join("settings.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("game/assets")).unwrap();
+        fs::write(root.join("game/assets/shared.dat"), "keep").unwrap();
+        fs::write(root.join("Arca Launcher.exe"), "keep").unwrap();
+
+        perform_maintenance("factory_reset", &instances_root, &root, &config).unwrap();
+
+        assert!(!instance_dir.exists());
+        assert!(!root.join("jre/javaruntime").exists());
+        assert!(!config.join("accounts.json").exists());
+        assert!(!config.join("settings.json").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("game/assets/shared.dat")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Arca Launcher.exe")).unwrap(),
+            "keep"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -2,19 +2,60 @@ import { useEffect, useState, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import { taskKey, useDownloads } from "./downloads";
 
 type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 
-export type Inst = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string };
-type Hit = { id: string; title: string; summary: string; icon: string; downloads: number; author: string; url: string };
+export type Inst = {
+  id: string;
+  name: string;
+  loader: string;
+  mc: string;
+  version_id: string;
+  icon: string;
+  description?: string;
+  background?: string;
+};
+type Hit = {
+  id: string;
+  title: string;
+  summary: string;
+  icon: string;
+  thumbnail: string;
+  categories: string[];
+  downloads: number;
+  follows?: number | null;
+  author: string;
+  url: string;
+  updated: string;
+  game_versions: string[];
+  loaders: string[];
+  client_side?: string | null;
+  server_side?: string | null;
+};
 type Res = { hits: Hit[]; total: number };
+type GameVersion = { version: string; version_type: string };
 type VersionHit = { id: string; name: string; channel: string; game_versions: string[]; loaders: string[]; date: string };
+type ProjectDetails = Hit & {
+  description: string;
+  published: string;
+  license: string;
+  categories: string[];
+  gallery: string[];
+};
+type ViewMode = "grid" | "list";
+type Environment = "any" | "client" | "server" | "both";
 
 type Props = {
   inst: Inst | null;
   java: string;
   javaMode: "system" | "custom";
+  showSnapshots: boolean;
+  showExperimental: boolean;
+  showBeta: boolean;
+  showAlpha: boolean;
   onPackInstalled: (list: Inst[]) => void;
   active: boolean;
 };
@@ -22,8 +63,70 @@ type Props = {
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmt = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n));
 const chLabel = (ch: string) => (ch === "release" ? "Release" : ch === "beta" ? "Beta" : ch === "alpha" ? "Alpha" : cap(ch));
+const loaders = ["fabric", "forge", "neoforge", "quilt"];
+const DOWNLOADER_ICON = new URL("../assets/icons/downloader.svg", import.meta.url).href;
+const GRID_ICON = new URL("../assets/icons/grid.svg", import.meta.url).href;
+const ROW_ICON = new URL("../assets/icons/row.svg", import.meta.url).href;
+const SOURCE_ICONS = {
+  modrinth: new URL("../assets/icons/modrinth.svg", import.meta.url).href,
+  curseforge: new URL("../assets/icons/curseforge.svg", import.meta.url).href,
+};
+const CONTENT_TYPES = [
+  { type: "mod", label: "Mods", icon: new URL("../assets/icons/mods.svg", import.meta.url).href },
+  { type: "modpack", label: "Modpacks", icon: new URL("../assets/icons/resourcepack.svg", import.meta.url).href },
+  { type: "resourcepack", label: "Resource Packs", icon: new URL("../assets/icons/texture.svg", import.meta.url).href },
+  { type: "shader", label: "Shaders", icon: new URL("../assets/icons/shaders.svg", import.meta.url).href },
+] as const;
+const isExperimentalGameVersion = (version: string) =>
+  /combat|experimental|infinite|oneblock|a_or_b|potato|craftmine|rv-|shareware|trendy/i.test(version);
+const shortDate = (date: string) => {
+  if (!date) return "";
+  const parsed = new Date(date);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString();
+};
 
-export default function ModsPage({ inst, java, javaMode, onPackInstalled, active }: Props) {
+function storedViewMode(): ViewMode {
+  try {
+    return localStorage.getItem("arca-downloader-view") === "list" ? "list" : "grid";
+  } catch (error) {
+    console.warn("Could not read downloader view preference", error);
+    return "grid";
+  }
+}
+
+function safeProjectDescription(source: string, value: string) {
+  const html = source === "curseforge"
+    ? value
+    : marked.parse(value, { async: false, gfm: true });
+  const clean = DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["iframe", "object", "embed"],
+    FORBID_ATTR: ["style"],
+  });
+  const parsed = new DOMParser().parseFromString(clean, "text/html");
+  parsed.body.querySelectorAll("a").forEach((link) => {
+    const href = link.getAttribute("href");
+    if (href && /^https?:\/\//i.test(href)) {
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
+    } else {
+      link.removeAttribute("href");
+    }
+  });
+  return parsed.body.innerHTML;
+}
+
+export default function ModsPage({
+  inst,
+  java,
+  javaMode,
+  showSnapshots,
+  showExperimental,
+  showBeta,
+  showAlpha,
+  onPackInstalled,
+  active,
+}: Props) {
   const { tasks, done, install, refreshInstalled } = useDownloads();
 
   const [source, setSource] = useState<"modrinth" | "curseforge">("modrinth");
@@ -31,12 +134,26 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   const [sort, setSort] = useState<"relevance" | "downloads" | "updated">("relevance");
   const [query, setQuery] = useState("");
   const [onlyCompat, setOnlyCompat] = useState(true);
+  const [filterLoader, setFilterLoader] = useState("");
+  const [filterMinecraft, setFilterMinecraft] = useState("");
+  const [environment, setEnvironment] = useState<Environment>("any");
+  const [viewMode, setViewMode] = useState<ViewMode>(storedViewMode);
+  const [pageSize, setPageSize] = useState(20);
+  const [page, setPage] = useState(1);
   const [hits, setHits] = useState<Hit[]>([]);
+  const [gameVersions, setGameVersions] = useState<GameVersion[]>([]);
+  const [gameVersionsLoaded, setGameVersionsLoaded] = useState(false);
+  const [gameVersionsError, setGameVersionsError] = useState("");
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [detailsProject, setDetailsProject] = useState<Hit | null>(null);
+  const [details, setDetails] = useState<ProjectDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState("");
   const reqId = useRef(0);
+  const detailsReqId = useRef(0);
 
   // version picker
   const [picker, setPicker] = useState<Hit | null>(null);
@@ -52,19 +169,48 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   const verReqId = useRef(0);
 
   const canMods = !!inst && inst.loader !== "vanilla";
-  const filterMc = kind !== "modpack" && onlyCompat && inst ? inst.mc : "";
-  const filterLoader = kind === "mod" && onlyCompat && canMods ? inst!.loader : "";
+  const filterMc = kind !== "modpack"
+    ? filterMinecraft === "any" ? "" : filterMinecraft || (onlyCompat && inst ? inst.mc : "")
+    : "";
+  const selectedLoader = filterLoader === "all"
+    ? ""
+    : filterLoader || (kind === "mod" && onlyCompat && canMods ? inst!.loader : "");
+  const selectableGameVersions = useMemo(() => gameVersions.filter(({ version, version_type }) => {
+    const type = version_type.toLowerCase();
+    if (type === "release") return true;
+    if (type === "snapshot" && isExperimentalGameVersion(version)) return showExperimental;
+    if (type === "snapshot") return showSnapshots;
+    if (type === "beta" || type === "old_beta") return showBeta;
+    if (type === "alpha" || type === "old_alpha") return showAlpha;
+    return false;
+  }), [gameVersions, showSnapshots, showExperimental, showBeta, showAlpha]);
+  const detailsDescription = useMemo(
+    () => details ? safeProjectDescription(source, details.description || details.summary) : "",
+    [details, source],
+  );
 
-  const search = async (offset: number, append: boolean) => {
+  const search = async (offset: number) => {
     const id = ++reqId.current;
     setLoading(true);
     setErr("");
+    setHits([]);
+    setTotal(0);
     try {
       const r = await invoke<Res>("mod_search", {
-        req: { source, kind, query, sort, mc: filterMc, loader: filterLoader, offset },
+        req: {
+          source,
+          kind,
+          query,
+          sort,
+          mc: filterMc,
+          loader: selectedLoader,
+          environment: source === "modrinth" ? environment : "any",
+          offset,
+          limit: pageSize,
+        },
       });
       if (id !== reqId.current) return;
-      setHits((prev) => (append ? [...prev, ...r.hits] : r.hits));
+      setHits(r.hits);
       setTotal(r.total);
     } catch (e) {
       if (id === reqId.current) setErr(String(e));
@@ -74,10 +220,67 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   };
 
   useEffect(() => {
-    const t = setTimeout(() => search(0, false), 350);
+    setPage(1);
+  }, [source, kind, query, sort, onlyCompat, filterLoader, filterMinecraft, environment, pageSize, inst?.mc, inst?.loader]);
+
+  useEffect(() => {
+    if (gameVersionsLoaded && filterMinecraft && filterMinecraft !== "any" &&
+        !selectableGameVersions.some(({ version }) => version === filterMinecraft)) {
+      setFilterMinecraft("");
+    }
+  }, [filterMinecraft, gameVersionsLoaded, selectableGameVersions]);
+
+  useEffect(() => {
+    let active = true;
+    invoke<GameVersion[]>("mod_game_versions")
+      .then((versions) => {
+        if (active) {
+          setGameVersions(versions);
+          setGameVersionsLoaded(true);
+          setGameVersionsError("");
+        }
+      })
+      .catch((error) => {
+        if (active) setGameVersionsError(`Could not load Minecraft versions: ${error}`);
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void search((page - 1) * pageSize);
+    }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, kind, query, sort, onlyCompat, inst?.id]);
+  }, [source, kind, query, sort, onlyCompat, filterLoader, filterMinecraft, environment, page, pageSize, inst?.id, inst?.mc, inst?.loader]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("arca-downloader-view", viewMode);
+    } catch (error) {
+      console.warn("Could not save downloader view preference", error);
+    }
+  }, [viewMode]);
+
+  useEffect(() => {
+    if (!detailsProject) return;
+    let active = true;
+    const id = ++detailsReqId.current;
+    setDetails(null);
+    setDetailsLoading(true);
+    setDetailsError("");
+    void invoke<ProjectDetails>("mod_project_details", { req: { source, id: detailsProject.id } })
+      .then((project) => {
+        if (active && id === detailsReqId.current) setDetails(project);
+      })
+      .catch((error) => {
+        if (active && id === detailsReqId.current) setDetailsError(String(error));
+      })
+      .finally(() => {
+        if (active && id === detailsReqId.current) setDetailsLoading(false);
+      });
+    return () => { active = false; };
+  }, [detailsProject, source]);
 
   useEffect(() => {
     if (!active || !inst || kind === "modpack") return;
@@ -105,6 +308,8 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   const doInstall = (h: Hit) => {
     install({
       source, kind, id: h.id, title: h.title, icon: h.icon,
+      description: kind === "modpack" ? h.summary : undefined,
+      backgroundUrl: kind === "modpack" ? h.thumbnail : undefined,
       instanceId: inst?.id, java, javaMode, onPackInstalled,
     });
   };
@@ -133,60 +338,130 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
   const toggle = (key: string) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
 
   return (
-    <section className="panel mods-panel">
-      <header className="mods-heading">
-        <div>
-          <span className="mods-eyebrow">DISCOVER & INSTALL</span>
-          <h2>Downloader</h2>
-          <p>{inst ? `${inst.name} · Minecraft ${inst.mc} · ${cap(inst.loader)}` : "Browse content from Modrinth and CurseForge"}</p>
+    <section className="mods-workspace">
+      <aside className="mods-sidebar">
+        <div className="mods-side-section">
+          <span className="mods-side-label">SELECTION</span>
+          <nav className="mods-types" aria-label="Content type">
+            {CONTENT_TYPES.map(({ type, icon, label }) => (
+              <button key={type} className={kind === type ? "on" : ""} onClick={() => setKind(type)}>
+                <img src={icon} alt="" />{label}
+              </button>
+            ))}
+          </nav>
         </div>
-        <div className="mods-sources" aria-label="Content source">
-          <button className={source === "modrinth" ? "on" : ""} onClick={() => setSource("modrinth")}>Modrinth</button>
-          <button className={source === "curseforge" ? "on" : ""} onClick={() => setSource("curseforge")}>CurseForge</button>
+        <div className="mods-side-section">
+          <span className="mods-side-label">SOURCE</span>
+          <div className="mods-sources" aria-label="Content source">
+            <button className={source === "modrinth" ? "on" : ""} onClick={() => { setSource("modrinth"); setDetailsProject(null); }}>
+              <img src={SOURCE_ICONS.modrinth} alt="" />Modrinth
+            </button>
+            <button className={source === "curseforge" ? "on" : ""} onClick={() => { setSource("curseforge"); setEnvironment("any"); setDetailsProject(null); }}>
+              <img src={SOURCE_ICONS.curseforge} alt="" />CurseForge
+            </button>
+          </div>
         </div>
-      </header>
-      <div className="mods-toolbar">
-        <div className="mods-types" aria-label="Content type">
-          <button className={kind === "mod" ? "on" : ""} onClick={() => setKind("mod")}>Mods</button>
-          <button className={kind === "modpack" ? "on" : ""} onClick={() => setKind("modpack")}>Modpacks</button>
-          <button className={kind === "resourcepack" ? "on" : ""} onClick={() => setKind("resourcepack")}>Resource Packs</button>
-          <button className={kind === "shader" ? "on" : ""} onClick={() => setKind("shader")}>Shader Packs</button>
+        <div className="mods-side-section mods-side-filters">
+          <div className="mods-side-filter-title"><span className="mods-side-label">FILTERS</span>
+            {(filterLoader || filterMinecraft || environment !== "any") && <button onClick={() => {
+              setFilterLoader(""); setFilterMinecraft(""); setEnvironment("any");
+            }}>Reset</button>}
+          </div>
+          {kind !== "modpack" && (
+            <label className="mods-compat">
+              <input type="checkbox" checked={onlyCompat} onChange={(e) => setOnlyCompat(e.target.checked)} />
+              <span><b>Compatible only</b><small>{inst ? `${inst.name} · ${inst.mc}` : "Selected instance"}</small></span>
+            </label>
+          )}
+          {kind === "mod" && (
+            <label className="mods-sidebar-control">Modloader
+              <select value={filterLoader} onChange={(e) => setFilterLoader(e.target.value)}>
+                <option value="">Instance default</option>
+                <option value="all">Any loader</option>
+                {loaders.map((loader) => <option value={loader} key={loader}>{cap(loader)}</option>)}
+              </select>
+            </label>
+          )}
+          {kind !== "modpack" && (
+            <label className="mods-sidebar-control">Minecraft version
+              <select value={filterMinecraft || ""} onChange={(e) => setFilterMinecraft(e.target.value)}>
+                <option value="">Instance default{onlyCompat && inst ? ` (${inst.mc})` : ""}</option>
+                <option value="any">Any version</option>
+                {selectableGameVersions.map(({ version }) => <option value={version} key={version}>{version}</option>)}
+              </select>
+              {gameVersionsError && <small className="mods-version-error">{gameVersionsError}</small>}
+            </label>
+          )}
+          {source === "modrinth" && (
+            <label className="mods-sidebar-control">Environment
+              <select value={environment} onChange={(e) => setEnvironment(e.target.value as Environment)}>
+                <option value="any">Any environment</option>
+                <option value="client">Client compatible</option>
+                <option value="server">Server compatible</option>
+                <option value="both">Client and server</option>
+              </select>
+            </label>
+          )}
         </div>
-        <label className="mods-sort">
-          <span>Sort by</span>
-          <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-            <option value="relevance">Relevance</option>
-            <option value="downloads">Most downloaded</option>
-            <option value="updated">Recently updated</option>
-          </select>
-        </label>
+        <div className="mods-sidebar-instance">
+          <span className="mods-instance-dot" />
+          <span><b>{inst?.name || "No instance selected"}</b><small>{inst ? `${cap(inst.loader)} · ${inst.mc}` : "Choose an instance to install"}</small></span>
+        </div>
+      </aside>
+      <div className="mods-content">
+        <div className="mods-sticky-bar">
+        <header className="mods-page-head">
+          <div><span className="mods-eyebrow mods-source-eyebrow"><img src={SOURCE_ICONS[source]} alt="" />{cap(source)} · DISCOVER</span>
+            <h2>{kind === "resourcepack" ? "Resource Packs" : kind === "shader" ? "Shader Packs" : `${cap(kind)}s`}</h2>
+            <p>Find something new for your next world.</p>
+          </div>
+          <div className="mods-head-controls">
+            <label className="mods-sort"><span>Sort</span>
+              <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+                <option value="relevance">Relevance</option><option value="downloads">Most downloaded</option><option value="updated">Recently updated</option>
+              </select>
+            </label>
+            <label className="mods-sort mods-page-size"><span>Show</span>
+              <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+                {[20, 50, 100].map((size) => <option value={size} key={size}>{size}</option>)}
+              </select>
+            </label>
+            <div className="mods-viewtoggle" aria-label="Result layout">
+              <button className={viewMode === "grid" ? "on" : ""} onClick={() => setViewMode("grid")} aria-label="Grid view">
+                <img src={GRID_ICON} alt="" />
+              </button>
+              <button className={viewMode === "list" ? "on" : ""} onClick={() => setViewMode("list")} aria-label="List view">
+                <img src={ROW_ICON} alt="" />
+              </button>
+            </div>
+          </div>
+        </header>
+        <div className="mods-searchwrap">
+          <span aria-hidden="true">⌕</span>
+          <input className="mods-search" placeholder={`Search ${kind === "shader" ? "shader packs" : kind === "resourcepack" ? "resource packs" : kind === "modpack" ? "modpacks" : "mods"}...`} value={query} onChange={(e) => setQuery(e.target.value)} />
+          {query && <button className="mini" onClick={() => setQuery("")}>Clear</button>}
+        </div>
+      <div className="mods-resultbar">
+        <div><b>{loading ? "Searching..." : total.toLocaleString()}</b><span>{loading ? "projects" : "projects found"}</span></div>
+        {loading && <span className="mods-searching"><i /> Updating</span>}
       </div>
-      <div className="mods-searchwrap">
-        <span aria-hidden="true">⌕</span>
-        <input className="mods-search" placeholder={`Search ${kind === "shader" ? "shader packs" : kind === "resourcepack" ? "resource packs" : kind === "modpack" ? "modpacks" : "mods"} by name or keyword...`} value={query} onChange={(e) => setQuery(e.target.value)} />
-        {query && <button className="mini" onClick={() => setQuery("")}>Clear</button>}
-      </div>
-
-      {kind !== "modpack" && (
-        <label className="check mods-compat">
-          <input type="checkbox" checked={onlyCompat} onChange={(e) => setOnlyCompat(e.target.checked)} />
-          Only show {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"} for {inst ? `${inst.name} (Minecraft ${inst.mc}${kind === "mod" ? ` · ${cap(inst.loader)}` : ""})` : "the selected instance"}
-        </label>
-      )}
-      {kind === "mod" && !canMods && (
-        <div className="err">Select a Fabric, Quilt, Forge or NeoForge instance on the Home page first. Vanilla instances can't use mods.</div>
-      )}
-      {kind === "modpack" && <p className="hint">Installing a modpack creates a new instance with its own folder.</p>}
-      {kind !== "modpack" && !inst && (
-        <div className="err">Select an instance on the Home page before installing {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"}.</div>
-      )}
-      {err && <div className="err">{err}</div>}
-
-      <div className="mods-results">
-        <span>{loading ? "Searching..." : `${total.toLocaleString()} results`}</span>
-        {loading && <span className="mods-searching"><i /> Updating results</span>}
-      </div>
-      <div className="mgrid">
+        {(filterLoader || (filterMinecraft && filterMinecraft !== "any") || environment !== "any") && (
+          <div className="mods-filterchips">
+            {filterLoader && <button onClick={() => setFilterLoader("")}>Loader · {filterLoader === "all" ? "Any" : cap(filterLoader)} ×</button>}
+            {filterMinecraft && <button onClick={() => setFilterMinecraft("")}>Minecraft · {filterMinecraft === "any" ? "Any" : filterMinecraft} ×</button>}
+            {environment !== "any" && <button onClick={() => setEnvironment("any")}>Environment · {cap(environment)} ×</button>}
+          </div>
+        )}
+        </div>
+        {kind === "mod" && !canMods && (
+          <div className="err">Select a Fabric, Quilt, Forge or NeoForge instance on the Home page first. Vanilla instances can't use mods.</div>
+        )}
+        {kind === "modpack" && <p className="hint">Installing a modpack creates a new instance with its own folder.</p>}
+        {kind !== "modpack" && !inst && (
+          <div className="err">Select an instance on the Home page before installing {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"}.</div>
+        )}
+        {err && <div className="err">{err}</div>}
+      <div className={`mgrid ${viewMode === "list" ? "mods-list" : ""}`}>
         {hits.map((h, index) => {
           const key = keyOf(h);
           const t = taskFor(h);
@@ -199,19 +474,35 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
           const deps = files?.filter((f) => f.dependency) ?? [];
 
           return (
-            <div className="mcard animate-stagger" key={h.id} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
+            <article className={`mcard animate-stagger${h.thumbnail ? "" : " mods-card-no-thumbnail"}`} key={h.id} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
+              {h.thumbnail && (
+                <div className="mods-card-media" aria-hidden="true">
+                  <img className="mods-card-thumbnail" src={h.thumbnail} alt="" loading="lazy"
+                    onLoad={(e) => e.currentTarget.parentElement?.classList.add("loaded")}
+                    onError={(e) => e.currentTarget.parentElement?.remove()} />
+                </div>
+              )}
               <div className="mcardtop">
-                <img className="micon" src={h.icon} width={56} height={56} alt=""
+                {h.icon && <img className="micon" src={h.icon} width={56} height={56} alt=""
                   onError={(e) => e.currentTarget.classList.add("is-hidden")} />
+                }
                 <div className="mcardmeta">
-                  <b>{h.title}</b>
-                  <span>by {h.author}</span>
+                  <button className="mods-card-title" onClick={() => setDetailsProject(h)}>{h.title}</button>
+                  <span>by {h.author || "Unknown author"}</span>
                 </div>
                 {isInstalled && root && (
                   <span className={"chpill " + root.channel}>{chLabel(root.channel)}</span>
                 )}
               </div>
               <p className="mdesc">{h.summary}</p>
+              {!!h.categories.length && <div className="mods-card-tags">
+                {h.categories.slice(0, 3).map((category) => <span key={category}>{cap(category.replace(/-/g, " "))}</span>)}
+                {h.categories.length > 3 && <span>+{h.categories.length - 3}</span>}
+              </div>}
+              <div className="mods-card-compat">
+                {h.game_versions.slice(0, 2).map((version) => <span key={version}>{version}</span>)}
+                {h.loaders.slice(0, 2).map((loader) => <span key={loader}>{cap(loader)}</span>)}
+              </div>
 
               {isInstalled && isOpen && files && (
                 <div className="filelist">
@@ -229,7 +520,12 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
               )}
 
               <div className="mcardfoot">
-                <span className="dlcount">⬇ {fmt(h.downloads)}</span>
+                <div className="mods-card-stats">
+                  <span className="dlcount"><i>↓</i>{fmt(h.downloads)}</span>
+                  {h.follows != null && <span className="dlcount"><i>♡</i>{fmt(h.follows)}</span>}
+                </div>
+                <span className="mods-card-updated">{h.updated ? shortDate(h.updated) : ""}</span>
+                <button className="mods-detail-button" onClick={() => setDetailsProject(h)}>Details</button>
                 {isRunning ? (
                   <div className="mcardprog">
                     <div className={"pbar slim" + (t!.pct == null ? " indeterminate" : "")}>
@@ -245,21 +541,86 @@ export default function ModsPage({ inst, java, javaMode, onPackInstalled, active
                     {" "}{isOpen ? "▾" : "▸"}
                   </button>
                 ) : (
-                  <button className="mini" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst)}
+                  <button className="mini mods-install-button" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst)}
                     onClick={() => (kind === "modpack" ? doInstall(h) : openPicker(h))}>
-                    {kind === "modpack" ? "Install pack" : "Install"}
+                    <img src={DOWNLOADER_ICON} alt="" />{kind === "modpack" ? "Install pack" : "Install"}
                   </button>
                 )}
               </div>
-            </div>
+            </article>
           );
         })}
       </div>
 
       {!loading && hits.length === 0 && !err && <p className="hint">No results.</p>}
-      {!loading && hits.length > 0 && hits.length < total && (
-        <button className="mini loadmore" onClick={() => search(hits.length, true)}>Load more</button>
+      {!loading && total > pageSize && (
+        <nav className="mods-pagination" aria-label="Search result pages">
+          <button className="mini" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button>
+          <span>{((page - 1) * pageSize + 1).toLocaleString()}–{Math.min(page * pageSize, total).toLocaleString()} of {total.toLocaleString()}</span>
+          <button className="mini" disabled={page >= Math.ceil(total / pageSize)} onClick={() => setPage((current) => current + 1)}>Next</button>
+        </nav>
       )}
+      </div>
+
+      {detailsProject && (() => {
+        const portals = document.getElementById("portals");
+        if (!portals) return null;
+        const project = details ?? detailsProject;
+        return createPortal(
+          <>
+            <div className="scrim popfade" onClick={() => setDetailsProject(null)} />
+            <section className="mods-detail-modal pop" role="dialog" aria-modal="true" aria-label={`${project.title} project details`}>
+              <header className="mods-detail-head">
+                <div className="mods-detail-title">
+                  {project.icon && <img className="micon" src={project.icon} width={52} height={52} alt="" />}
+                  <div><span className="mods-eyebrow mods-source-eyebrow"><img src={SOURCE_ICONS[source]} alt="" />{cap(source)} PROJECT</span><h2>{project.title}</h2><p>by {project.author || detailsProject.author || "Unknown author"}</p></div>
+                </div>
+                <button className="mini" onClick={() => setDetailsProject(null)} aria-label="Close project details">✕</button>
+              </header>
+              {detailsLoading && <div className="hint">Loading full project details...</div>}
+              {detailsError && <div className="err">{detailsError}</div>}
+              {!detailsLoading && !detailsError && details && (
+                <>
+                  <div className="mods-detail-stats">
+                    <span>⬇ {fmt(details.downloads)} downloads</span>
+                    {details.follows != null && <span>♥ {fmt(details.follows)} followers</span>}
+                    {details.published && <span>Published {shortDate(details.published)}</span>}
+                    {details.updated && <span>Updated {shortDate(details.updated)}</span>}
+                  </div>
+                  <p className="mods-detail-summary">{details.summary}</p>
+                  <div className="mods-detail-meta">
+                    {details.license && <span><b>License</b>{details.license}</span>}
+                    {!!details.categories.length && <span><b>Categories</b>{details.categories.join(", ")}</span>}
+                    {!!details.game_versions.length && <span><b>Minecraft</b>{details.game_versions.slice(0, 12).join(", ")}{details.game_versions.length > 12 ? ` +${details.game_versions.length - 12}` : ""}</span>}
+                    {!!details.loaders.length && <span><b>Loaders</b>{details.loaders.map(cap).join(", ")}</span>}
+                    {source === "modrinth" && <span><b>Environment</b>Client: {details.client_side || "unknown"} · Server: {details.server_side || "unknown"}</span>}
+                  </div>
+                  {details.gallery.length > 0 && (
+                    <div className="mods-gallery">
+                      {details.gallery.map((image, index) => <img src={image} alt={`${details.title} screenshot ${index + 1}`} key={`${image}-${index}`} loading="lazy" />)}
+                    </div>
+                  )}
+                  <div className="mods-detail-description">
+                    <h3>Description</h3>
+                    <div className="mods-markdown" dangerouslySetInnerHTML={{ __html: detailsDescription || "<p>No description provided.</p>" }} />
+                  </div>
+                </>
+              )}
+              {details && <footer className="mods-detail-actions">
+                <a className="mini" href={details.url || detailsProject.url} target="_blank" rel="noreferrer">Open on {cap(source)}</a>
+                <button className="mini" disabled={(kind === "mod" && !canMods) || (kind !== "modpack" && !inst)} onClick={() => {
+                  setDetailsProject(null);
+                  if (kind === "modpack") doInstall(detailsProject);
+                  else openPicker(detailsProject);
+                }}>
+                  {kind === "modpack" ? "Install pack" : "Choose version"}
+                </button>
+              </footer>}
+            </section>
+          </>,
+          portals,
+        );
+      })()}
 
       {picker && (() => {
         const portals = document.getElementById("portals");

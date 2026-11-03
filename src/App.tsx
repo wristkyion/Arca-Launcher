@@ -20,6 +20,25 @@ type ThemeInfo = { id: string; name: string; author: string; builtin: boolean };
 type ThemeCatalog = { themes: ThemeInfo[]; warnings: string[] };
 type ThemeStylesheet = { id: string; name: string; author: string; css: string };
 type LauncherUpdateCheck = { current_version: string; latest_version: string; update_available: boolean };
+type MaintenanceAction = "delete_instances" | "delete_java" | "clean_accounts" | "factory_reset";
+const MAINTENANCE_DETAILS: Record<MaintenanceAction, { title: string; description: string }> = {
+  delete_instances: {
+    title: "Delete all instances?",
+    description: "All recognized Arca instances and their saves, mods, resource packs, and configuration files will be permanently deleted.",
+  },
+  delete_java: {
+    title: "Delete downloaded Java?",
+    description: "Only Java runtimes downloaded and managed by Arca Launcher will be removed. System Java and custom Java installations are untouched.",
+  },
+  clean_accounts: {
+    title: "Clean saved accounts?",
+    description: "Saved account credentials and cached skins will be removed from this launcher.",
+  },
+  factory_reset: {
+    title: "Reset Arca Launcher?",
+    description: "This permanently deletes all recognized instances, launcher-managed Java runtimes, saved accounts, and launcher settings. Shared Minecraft game assets and the launcher installation will remain.",
+  },
+};
 type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
 const BUILTIN_THEMES: ThemeInfo[] = [
   { id: "builtin:default", name: "Default", author: "Built-in", builtin: true },
@@ -352,6 +371,70 @@ function InstIcon({ inst, size }: { inst: { loader: string; icon?: string }; siz
   return <LoaderIcon loader={inst.loader} size={size} />;
 }
 
+function InstanceRowBackground({
+  instance,
+  className,
+  style,
+  children,
+  onBackgroundError,
+}: {
+  instance: Instance;
+  className?: string;
+  style?: CSSProperties;
+  children: ReactNode;
+  onBackgroundError: (message: string) => void;
+}) {
+  const rowRef = useRef<HTMLElement>(null);
+  const onBackgroundErrorRef = useRef(onBackgroundError);
+  const [background, setBackground] = useState("");
+  onBackgroundErrorRef.current = onBackgroundError;
+
+  useEffect(() => {
+    let active = true;
+    setBackground("");
+    if (!instance.background) return () => { active = false; };
+
+    const loadBackground = () => {
+      void invoke<string | null>("load_instance_background", { id: instance.id })
+        .then((image) => { if (active) setBackground(image ?? ""); })
+        .catch((error) => {
+          if (active) onBackgroundErrorRef.current(`Could not load background for ${instance.name}: ${error}`);
+        });
+    };
+
+    const row = rowRef.current;
+    if (!row || typeof IntersectionObserver === "undefined") {
+      loadBackground();
+      return () => { active = false; };
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        loadBackground();
+      }
+    });
+    observer.observe(row);
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }, [instance.id, instance.name, instance.background]);
+
+  return (
+    <article
+      ref={rowRef}
+      className={"instance-row" + (className ? ` ${className}` : "") + (background ? " has-background" : "")}
+      style={{
+        ...style,
+        ...(background ? { "--instance-background": `url("${background}")` } as CSSVars : {}),
+      }}
+    >
+      {children}
+    </article>
+  );
+}
+
 function AppInner() {
   const isSplashWindow = (() => {
     try {
@@ -360,7 +443,7 @@ function AppInner() {
       return new URLSearchParams(window.location.search).get("window") === "splash";
     }
   })();
-  const { configureDownloads, installInstance, startMigration } = useDownloads();
+  const { configureDownloads, installInstance, startMigration, anyRunning } = useDownloads();
   const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [page, setPageNow] = useState<Page>("play");
   const [fade, setFade] = useState<"in" | "out">("in");
@@ -404,6 +487,7 @@ function AppInner() {
   // instances
   const [instances, setInstances] = useState<Instance[]>([]);
   const [instId, setInstId] = useState("");
+  const [instanceSearch, setInstanceSearch] = useState("");
   const [activeBackground, setActiveBackground] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuClosing, setMenuClosing] = useState(false);
@@ -443,6 +527,7 @@ function AppInner() {
   const [versionPage, setVersionPage] = useState(1);
   const [sysRam, setSysRam] = useState(0);
   const [st, setSt] = useState<Settings>(DEFAULTS);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<"game" | "launcher">("game");
   const [themeCatalog, setThemeCatalog] = useState<ThemeInfo[]>(BUILTIN_THEMES);
   const [themesReady, setThemesReady] = useState(false);
   const [themeWarnings, setThemeWarnings] = useState<string[]>([]);
@@ -458,6 +543,9 @@ function AppInner() {
   const [instanceDirectoryMessage, setInstanceDirectoryMessage] = useState("");
   const [javaRuntimeBusy, setJavaRuntimeBusy] = useState(false);
   const [javaRuntimeMessage, setJavaRuntimeMessage] = useState("");
+  const [maintenanceAction, setMaintenanceAction] = useState<MaintenanceAction | null>(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
+  const [maintenanceMessage, setMaintenanceMessage] = useState("");
   const [ram, setRam] = useState(4096);
   const [java, setJava] = useState("java");
   const [showCrashReports, setShowCrashReports] = useState(true);
@@ -715,10 +803,18 @@ function AppInner() {
     return false;
   }), [vinfo, st]);
   const filtered = visible.filter((v) => v.id.includes(filter));
-  const versionsPerPage = 10;
+  const filteredInstances = useMemo(() => {
+    const query = instanceSearch.trim().toLowerCase();
+    if (!query) return instances;
+    return instances.filter((instance) =>
+      [instance.name, instance.id, instance.loader, instance.mc, instance.version_id, instance.description]
+        .some((value) => value.toLowerCase().includes(query)),
+    );
+  }, [instances, instanceSearch]);
+  const versionsPerPage = 20;
   const versionPageCount = Math.max(1, Math.ceil(filtered.length / versionsPerPage));
   const currentVersionPage = Math.min(versionPage, versionPageCount);
-  const pagedVersions = filtered.slice((currentVersionPage - 1) * versionsPerPage, currentVersionPage * versionsPerPage);
+  const pagedVersions = filtered.slice(0, currentVersionPage * versionsPerPage);
   const firstRunMc = wMc || vinfo.find((v) => v.kind === "release")?.id || "";
 
   useEffect(() => {
@@ -896,6 +992,41 @@ function AppInner() {
       setInstanceDirectoryBusy(false);
     }
   };
+  const runMaintenanceAction = async () => {
+    if (!maintenanceAction) return;
+    setMaintenanceBusy(true);
+    setMaintenanceMessage("");
+    try {
+      const message = await invoke<string>("run_maintenance_action", { action: maintenanceAction });
+      if (maintenanceAction === "delete_instances" || maintenanceAction === "factory_reset") {
+        setInstances([]);
+        setInstId("");
+        setContentInst(null);
+      }
+      if (maintenanceAction === "clean_accounts" || maintenanceAction === "factory_reset") {
+        setAccounts([]);
+        setSelected(null);
+        setSkins({});
+        setSkinFail(false);
+      }
+      if (maintenanceAction === "factory_reset") {
+        setSt(DEFAULTS);
+        setInstanceDirectoryDraft("");
+        setInstanceDirectoryMessage("");
+        setRam(4096);
+        setJava("java");
+        setShowCrashReports(true);
+        setStartup(false);
+        setActiveSettingsTab("game");
+      }
+      setMaintenanceMessage(message);
+      setMaintenanceAction(null);
+    } catch (error) {
+      setMaintenanceMessage(`Could not complete the requested cleanup: ${error}`);
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  };
   const downloadJavaRuntime = async () => {
     if (!inst) return;
     setJavaRuntimeBusy(true);
@@ -955,12 +1086,14 @@ function AppInner() {
     }
   };
   const saveEdit = async () => {
+    const editedId = editId;
+    if (!editedId) return;
     try {
       const updated = await invoke<Instance[]>("edit_instance", {
-        req: { id: editId, name: editName, icon: editIcon, description: editDesc, background: editBg },
+        req: { id: editedId, name: editName, icon: editIcon, description: editDesc, background: editBg },
       });
       setInstances(updated);
-      setActiveBackground(editBg);
+      if (editedId === instId) setActiveBackground(editBg);
       setEditId(null);
     } catch (e) { add(`ERROR: ${e}`); setPage("console"); }
   };
@@ -1462,124 +1595,212 @@ function AppInner() {
               </div>
 
               {tab === "download" && (<>
-                <div className="steps">
-                  {["Version", "Loader", "Name"].map((s, i) => (
-                    <span key={s} className={"stp" + (step === i + 1 ? " on" : "") + (step > i + 1 ? " done" : "")}>{i + 1}. {s}</span>
-                  ))}
-                </div>
+                <div className="new-instance-flow">
+                  <nav className="steps" aria-label="New instance setup">
+                    {[
+                      ["Version", "Choose game version"],
+                      ["Loader", "Pick mod support"],
+                      ["Details", "Make it yours"],
+                    ].map(([label, hint], i) => (
+                      <button
+                        key={label}
+                        type="button"
+                        className={"stp" + (step === i + 1 ? " on" : "") + (step > i + 1 ? " done" : "")}
+                        disabled={step < i + 1}
+                        onClick={() => setStep(i + 1)}
+                        aria-current={step === i + 1 ? "step" : undefined}
+                      >
+                        <span className="stp-number">{step > i + 1 ? "✓" : i + 1}</span>
+                        <span className="stp-copy"><b>{label}</b><small>{hint}</small></span>
+                      </button>
+                    ))}
+                  </nav>
 
-                <div key={step} className="stepbox">
+                <div key={step} className="stepbox new-instance-step">
                 {step === 1 && (<>
-                  <label>Pick a Minecraft version</label>
-                  <input placeholder="Search: 1.20, 1.21.1 ..." value={filter} onChange={(e) => { setFilter(e.target.value); setVersionPage(1); }} />
+                  <div className="new-step-heading">
+                    <div><h3>Choose your Minecraft version</h3><p>Pick the release you want this instance to run.</p></div>
+                    <span className="new-step-count">{filtered.length} available</span>
+                  </div>
+                  <label className="version-search">
+                    <span className="instance-search-glyph" aria-hidden="true" />
+                    <input placeholder="Search versions, e.g. 1.20.4..." value={filter} onChange={(e) => { setFilter(e.target.value); setVersionPage(1); }} />
+                  </label>
                   <div className="vlist">
                     {pagedVersions.map((v) => (
                       <button key={v.id} className={"vrow " + v.kind + (v.id === wMc ? " on" : "")}
-                        onClick={() => { setWMc(v.id); setStep(2); }}>
+                        onClick={() => setWMc(v.id)}
+                        aria-pressed={v.id === wMc}>
                         <span className="vrow-main"><LoaderIcon loader="vanilla" size={28} /><b>{v.id}</b></span>
-                        <span className="vkind">{kindLabel(v)}</span>
+                        <span className="vrow-trailing"><span className="vkind">{kindLabel(v)}</span><span className="vrow-check">{v.id === wMc ? "✓" : "○"}</span></span>
                       </button>
                     ))}
-                  </div>
-                  {filtered.length > versionsPerPage && (
+                    {filtered.length > versionsPerPage && (
                     <div className="version-pagination">
-                      <button className="mini" disabled={currentVersionPage === 1} onClick={() => setVersionPage(currentVersionPage - 1)}>← Previous</button>
-                      <span>{(currentVersionPage - 1) * versionsPerPage + 1}–{Math.min(currentVersionPage * versionsPerPage, filtered.length)} of {filtered.length} · Page {currentVersionPage} of {versionPageCount}</span>
-                      <button className="mini" disabled={currentVersionPage === versionPageCount} onClick={() => setVersionPage(currentVersionPage + 1)}>Next →</button>
+                      <span>Showing {Math.min(currentVersionPage * versionsPerPage, filtered.length)} of {filtered.length} versions</span>
+                      {currentVersionPage < versionPageCount && <button className="mini" onClick={() => setVersionPage(currentVersionPage + 1)}>Load more versions</button>}
                     </div>
                   )}
+                    {filtered.length === 0 && <div className="new-version-empty">No versions match that search.</div>}
+                  </div>
                   {vinfo.length === 0 && <p className="hint">Loading the version list...</p>}
                   {(st.showBeta || st.showAlpha) && <p className="hint">Old alpha and beta versions need Java 8 and may not start correctly.</p>}
-                  {!st.showSnapshots && !st.showBeta && !st.showAlpha && !st.showExperimental && (
-                    <p className="hint">Only releases are shown. Turn on snapshots, beta, alpha or experimental in Settings.</p>
-                  )}
+                  <div className="btnrow new-step-footer">
+                    <span className="new-selection-hint">{wMc ? `Selected: Minecraft ${wMc}` : "Select a version to continue."}</span>
+                    <button className="btn purple addbtn" disabled={!wMc} onClick={() => setStep(2)}>Next: choose loader <span aria-hidden="true">→</span></button>
+                  </div>
                 </>)}
 
                 {step === 2 && (<>
-                  <label>Minecraft {wMc}: pick a loader</label>
+                  <div className="new-step-heading">
+                    <div><h3>How do you want to play?</h3><p>Choose a loader for Minecraft {wMc}. Vanilla needs no extra loader.</p></div>
+                    <span className="new-step-count">Minecraft {wMc}</span>
+                  </div>
                   <div className="lgrid">
                     {LOADERS.map((l) => {
                       const ok = l === "vanilla" || (support !== null && support.includes(l));
                       return (
                         <button key={l} className={"lcard" + (wLoader === l ? " on" : "")} disabled={!ok}
-                          onClick={() => { setWLoader(l); if (!nameEdited.current) setWName(`${cap(l)} ${wMc}`); setStep(3); }}>
-                          <LoaderIcon loader={l} size={44} />
-                          <div><b>{cap(l)}</b><small>{ok ? SHORT[l] : support === null ? "Checking..." : "Not available for this version"}</small></div>
+                          onClick={() => { setWLoader(l); if (!nameEdited.current) setWName(`${cap(l)} ${wMc}`); }}
+                          aria-pressed={wLoader === l}>
+                          <span className="lcard-icon"><LoaderIcon loader={l} size={40} /></span>
+                          <span className="lcard-copy"><b>{cap(l)}</b><small>{ok ? SHORT[l] : support === null ? "Checking..." : "Not available for this version"}</small></span>
+                          <span className="lcard-check">{wLoader === l ? "✓" : "→"}</span>
                         </button>
                       );
                     })}
                   </div>
-                  <div className="btnrow"><button className="mini" onClick={() => setStep(1)}>← Back</button></div>
+                  {support === null && <p className="new-step-note">Checking loader compatibility for this Minecraft version…</p>}
+                  <div className="btnrow new-step-footer">
+                    <button className="mini" onClick={() => setStep(1)}>← Back to versions</button>
+                    <button className="btn purple addbtn" onClick={() => setStep(3)}>Next: instance details <span aria-hidden="true">→</span></button>
+                  </div>
                 </>)}
 
                 {step === 3 && (<>
-                  <label>Name your instance</label>
-                  <input value={wName} onChange={(e) => { nameEdited.current = true; setWName(e.target.value); }} />
-                  <label>Logo</label>
-                  <div className="logorow">
-                    <InstIcon inst={{ loader: wLoader, icon: wIcon }} size={64} />
-                    <button className="mini" onClick={() => pickFile("logo-new")}>Choose image...</button>
-                    <button className="mini" onClick={() => setWIcon("")}>Use default</button>
+                  <div className="new-step-heading">
+                    <div><h3>Give this instance a name</h3><p>Personalize its identity. You can change these details later.</p></div>
+                    <div className="new-build-chip"><InstIcon inst={{ loader: wLoader, icon: wIcon }} size={28} /><span><b>Minecraft {wMc}</b><small>{cap(wLoader)}</small></span></div>
                   </div>
-                  <label>Description (optional)</label>
-                  <textarea className="desc" rows={3} value={wDesc} onChange={(e) => setWDesc(e.target.value)}
-                    placeholder="What's this instance for?" />
-                  <label>Background (optional)</label>
-                  <div className="bgrow">
-                    {wBg ? <BgPreview className="bgpreview" src={wBg} /> : <div className="bgpreview ph" />}
-                    <button className="mini" onClick={() => {
-                      setBackgroundPickerTarget("new");
-                      setBackgroundPickerError("");
-                      setShowLauncherBackgrounds(false);
-                      setBackgroundPickerOpen(true);
-                    }}>Choose background...</button>
+                  <div className="new-instance-form">
+                    <section className="new-form-section">
+                      <label htmlFor="new-instance-name">Instance name</label>
+                      <input id="new-instance-name" value={wName} onChange={(e) => { nameEdited.current = true; setWName(e.target.value); }} placeholder="e.g. Survival with friends" autoFocus />
+                      <label htmlFor="new-instance-description">Description <span className="field-note">Optional</span></label>
+                      <textarea id="new-instance-description" className="desc" rows={2} value={wDesc} onChange={(e) => setWDesc(Array.from(e.target.value).slice(0, 1200).join(""))}
+                        placeholder="What will you use this setup for?" />
+                      <span className="description-counter">{Array.from(wDesc).length}/1200</span>
+                    </section>
+                    <section className="new-form-section new-form-assets">
+                      <div className="new-asset-group">
+                        <label>Instance icon</label>
+                        <div className="new-icon-preview"><InstIcon inst={{ loader: wLoader, icon: wIcon }} size={48} /></div>
+                        <div className="new-asset-actions">
+                          <button className="mini" onClick={() => pickFile("logo-new")}>Choose icon</button>
+                          <button className="mini" onClick={() => setWIcon("")}>Reset</button>
+                        </div>
+                      </div>
+                      <div className="new-asset-group new-background-group">
+                        <label>Card background <span className="field-note">Optional</span></label>
+                        <div className="new-background-preview">
+                          {wBg ? <BgPreview className="bgpreview" src={wBg} /> : <span className="new-background-placeholder">No background selected</span>}
+                        </div>
+                        <div className="new-asset-actions">
+                          <button className="mini" onClick={() => {
+                            setBackgroundPickerTarget("new");
+                            setBackgroundPickerError("");
+                            setShowLauncherBackgrounds(false);
+                            setBackgroundPickerOpen(true);
+                          }}>Choose background</button>
+                          {wBg && <button className="mini" onClick={() => setWBg("")}>Remove</button>}
+                        </div>
+                      </div>
+                    </section>
                   </div>
-                  <p className="hint">Minecraft {wMc} · {cap(wLoader)}</p>
-                  <div className="btnrow">
-                    <button className="mini" onClick={() => setStep(2)}>← Back</button>
-                    <button className="btn purple addbtn" disabled={!wName.trim()} onClick={enqueueInstance}>Create and install</button>
+                  <div className="btnrow new-step-footer">
+                    <button className="mini" onClick={() => setStep(2)}>← Back to loader</button>
+                    <button className="btn purple addbtn" disabled={!wName.trim()} onClick={enqueueInstance}>Create and install <span aria-hidden="true">→</span></button>
                   </div>
                 </>)}
+                </div>
                 </div>
               </>)}
 
               {tab === "instances" && (
-                <div className="ilist">
-                  {instances.length === 0 && (
-                    <div className="instances-empty"><span className="empty-cube"><Icon n="cube" /></span>
-                      <b>Your library is empty</b><p>Create an instance to start playing.</p>
-                      <button className="btn purple" onClick={() => setTab("download")}>Create an instance</button></div>
-                  )}
-                  {instances.map((i, index) => (
-                    <div key={i.id} className={("icard" + (i.id === instId ? " on" : "") + " animate-stagger")} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
-                      <div className="icard-top">
-                        <div className="icard-art"><InstIcon inst={i} size={52} /><span>{i.mc}</span></div>
-                        {i.id === instId && <span className="badge">Selected</span>}
+                <>
+                  <div className="instances-toolbar">
+                    <label className="instance-search">
+                      <span className="instance-search-glyph" aria-hidden="true" />
+                      <input
+                        type="text"
+                        value={instanceSearch}
+                        onChange={(event) => setInstanceSearch(event.target.value)}
+                        placeholder="Search by name, version, or loader..."
+                        aria-label="Search instances"
+                      />
+                      {instanceSearch && <button className="instance-search-clear" aria-label="Clear search" onClick={() => setInstanceSearch("")}>×</button>}
+                    </label>
+                    <span className="instance-count">{filteredInstances.length} of {instances.length} instances</span>
+                  </div>
+                  <div className="ilist">
+                    {instances.length === 0 ? (
+                      <div className="instances-empty"><span className="empty-cube"><Icon n="cube" /></span>
+                        <b>Your library is empty</b><p>Create an instance to start playing.</p>
+                        <button className="btn purple" onClick={() => setTab("download")}>Create an instance</button></div>
+                    ) : filteredInstances.length === 0 ? (
+                      <div className="instances-empty instance-no-results">
+                        <b>No instances found</b><p>Try another name, Minecraft version, or loader.</p>
                       </div>
-                      <div className="iinfo">
-                        <b>{i.name}</b><span>{cap(i.loader)} <i /> Minecraft {i.mc}</span>
-                        {i.description && <p>{i.description}</p>}
-                      </div>
-                      <div className="icard-actions">
-                        {delId === i.id ? (<>
-                          <span className="hint">Delete?</span>
-                          <button className="mini danger" onClick={() => removeInst(i.id, false)}>Remove</button>
-                          <button className="mini danger" onClick={() => removeInst(i.id, true)}>Remove + delete files</button>
-                          <button className="mini" onClick={() => setDelId(null)}>Cancel</button>
-                        </>) : (<>
-                          <button className="mini" onClick={() => {
-                            setTab("instances");
-                            setPage("versions");
-                            setContentInst(i);
-                          }}>Content</button>
-                          {i.id !== instId && <button className="mini select-instance" onClick={() => setInstId(i.id)}>Select</button>}
-                          <button className="mini" onClick={() => startEdit(i)}>Edit</button>
-                          <button className="mini danger" onClick={() => setDelId(i.id)}>Delete</button>
-                        </>)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ) : filteredInstances.map((i, index) => (
+                      <InstanceRowBackground
+                        key={i.id}
+                        instance={i}
+                        className={(i.id === instId ? "on " : "") + "animate-stagger"}
+                        style={{ animationDelay: `${Math.min(index, 20) * 0.02}s` }}
+                        onBackgroundError={(message) => add(message)}
+                      >
+                        <button
+                          className="instance-row-main"
+                          onClick={() => setInstId(i.id)}
+                          aria-pressed={i.id === instId}
+                          title={`Set ${i.name} as the active instance`}
+                        >
+                          <span className="instance-row-icon"><InstIcon inst={i} size={38} /></span>
+                          <span className="instance-row-info">
+                            <b>{i.name}</b>
+                            <span className="instance-row-meta">
+                              <span>{cap(i.loader)}</span><i />
+                              <span>Minecraft {i.mc}</span>
+                              {i.version_id !== i.mc && <><i /><span>{i.version_id}</span></>}
+                            </span>
+                            {i.description && <span className="instance-row-description">{i.description}</span>}
+                          </span>
+                        </button>
+                        <span className="instance-row-status">
+                          {i.id === instId
+                            ? <span className="instance-active"><i />Active</span>
+                            : <button className="mini select-instance" onClick={() => setInstId(i.id)}>Set active</button>}
+                        </span>
+                        <div className="instance-row-actions">
+                          {delId === i.id ? (<>
+                            <span className="instance-delete-label">Remove?</span>
+                            <button className="mini danger" onClick={() => removeInst(i.id, false)}>Remove</button>
+                            <button className="mini danger" onClick={() => removeInst(i.id, true)}>Remove files</button>
+                            <button className="mini" onClick={() => setDelId(null)}>Cancel</button>
+                          </>) : (<>
+                            <button className="mini" onClick={() => {
+                              setTab("instances");
+                              setPage("versions");
+                              setContentInst(i);
+                            }}>Content</button>
+                            <button className="mini" onClick={() => void startEdit(i)}>Edit</button>
+                            <button className="mini danger" onClick={() => setDelId(i.id)}>Delete</button>
+                          </>)}
+                        </div>
+                      </InstanceRowBackground>
+                    ))}
+                  </div>
+                </>
               )}
             </section>
             )
@@ -1608,15 +1829,45 @@ function AppInner() {
           )}
           {page === "settings" && (
             <section className="panel settings-page">
-              <header className="page-heading">
-                <div><span className="eyebrow">PREFERENCES</span><h2>Settings</h2>
-                  <p>Control Minecraft performance and launcher appearance.</p></div>
-              </header>
-              <div className="settings-groups">
-                <div className="settings-group">
-                  <h3 className="settings-category-title">Game settings</h3>
+              <div className="settings-layout">
+                <aside className="settings-sidebar">
+                  <div className="settings-sidebar-heading">
+                    <span className="eyebrow">PREFERENCES</span>
+                    <h2>Settings</h2>
+                  </div>
+                  <nav className="settings-nav" aria-label="Settings categories" role="tablist" aria-orientation="vertical">
+                    <button
+                      id="settings-tab-game"
+                      className={activeSettingsTab === "game" ? "active" : ""}
+                      role="tab"
+                      aria-selected={activeSettingsTab === "game"}
+                      aria-controls="settings-panel-game"
+                      onClick={() => setActiveSettingsTab("game")}
+                    >Game Settings</button>
+                    <button
+                      id="settings-tab-launcher"
+                      className={activeSettingsTab === "launcher" ? "active" : ""}
+                      role="tab"
+                      aria-selected={activeSettingsTab === "launcher"}
+                      aria-controls="settings-panel-launcher"
+                      onClick={() => setActiveSettingsTab("launcher")}
+                    >Launcher Settings</button>
+                  </nav>
+                  <p className="settings-sidebar-note">Changes are saved automatically.</p>
+                </aside>
+                <div className="settings-content">
+                  <header className="page-heading settings-heading">
+                    <div><span className="eyebrow">ARCA LAUNCHER</span>
+                      <h2>{activeSettingsTab === "game" ? "Game Settings" : "Launcher Settings"}</h2>
+                      <p>{activeSettingsTab === "game"
+                        ? "Configure Minecraft runtime, memory, and versions."
+                        : "Customize the launcher interface, themes, and updates."}</p>
+                    </div>
+                  </header>
+                  <div className="settings-groups">
+                {activeSettingsTab === "game" && <div className="settings-group" id="settings-panel-game" role="tabpanel" aria-labelledby="settings-tab-game">
                   <div className="settings-grid">
-                    <section className="setting-card">
+                    <section className="setting-card" id="settings-game-java">
                       <div className="setting-title"><span className="setting-icon"><Icon n="game" /></span><div><h3>Game & Java</h3><p>Runtime, launch arguments, and in-game options.</p></div></div>
                       <label>Java runtime</label>
                       <select value={st.javaRuntime} onChange={(e) => {
@@ -1645,7 +1896,7 @@ function AppInner() {
                       <input type="range" min={0} max={100} step={5} disabled={!st.volumeOn} value={st.volume} onChange={(e) => set("volume", +e.target.value)} />
                     </section>
 
-                    <section className="setting-card">
+                    <section className="setting-card" id="settings-memory">
                       <div className="setting-title"><span className="setting-icon"><Icon n="memory" /></span><div><h3>Memory</h3><p>Choose how much RAM Minecraft can use.</p></div></div>
                       <label className="check">
                         <input type="checkbox" checked={st.ramAuto} onChange={(e) => set("ramAuto", e.target.checked)} />
@@ -1656,7 +1907,7 @@ function AppInner() {
                         step={512} value={ram} onChange={(e) => setRam(+e.target.value)} />
                     </section>
 
-                    <section className="setting-card">
+                    <section className="setting-card" id="settings-versions">
                       <div className="setting-title"><span className="setting-icon"><Icon n="version" /></span><div><h3>Version list</h3><p>Choose which Minecraft releases appear in the browser.</p></div></div>
                       <label className="check"><input type="checkbox" checked={st.showSnapshots} onChange={(e) => set("showSnapshots", e.target.checked)} /> Snapshots</label>
                       <label className="check"><input type="checkbox" checked={st.showExperimental} onChange={(e) => set("showExperimental", e.target.checked)} /> Experimental and special versions</label>
@@ -1664,7 +1915,7 @@ function AppInner() {
                       <label className="check"><input type="checkbox" checked={st.showAlpha} onChange={(e) => set("showAlpha", e.target.checked)} /> Old alpha</label>
                     </section>
 
-                    <section className="setting-card">
+                    <section className="setting-card" id="settings-instances">
                       <div className="setting-title"><span className="setting-icon"><Icon n="instances" /></span><div><h3>Instances</h3><p>Manage instance storage and installation activity.</p></div></div>
                       <label>Instance folder</label>
                       <div className="folder-picker-row">
@@ -1682,14 +1933,17 @@ function AppInner() {
                       <input type="range" min={1} max={5} step={1} value={st.downloadConcurrency}
                         onChange={(e) => set("downloadConcurrency", +e.target.value)} />
                       <p className="setting-note">Higher values can use more bandwidth and system resources.</p>
+                      <label className="check">
+                        <input type="checkbox" checked={st.autoClearDownloads} onChange={(e) => set("autoClearDownloads", e.target.checked)} />
+                        Automatically clear completed tasks
+                      </label>
                     </section>
                   </div>
-                </div>
+                </div>}
 
-                <div className="settings-group">
-                  <h3 className="settings-category-title">Launcher settings</h3>
+                {activeSettingsTab === "launcher" && <div className="settings-group" id="settings-panel-launcher" role="tabpanel" aria-labelledby="settings-tab-launcher">
                   <div className="settings-grid">
-                    <section className="setting-card">
+                    <section className="setting-card" id="settings-interface">
                       <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Interface</h3><p>Set the launch experience and interface scale.</p></div></div>
                       <label>When the game starts</label>
                       <select value={st.hide} onChange={(e) => set("hide", e.target.value as Settings["hide"])}>
@@ -1706,7 +1960,7 @@ function AppInner() {
                       <p className="setting-note">Minimizes motion effects throughout the launcher. Helpful for motion sensitivity or performance.</p>
                     </section>
 
-                    <section className="setting-card">
+                    <section className="setting-card" id="settings-themes">
                       <div className="setting-title"><span className="setting-icon"><Icon n="theme" /></span><div><h3>Theme</h3><p>Choose the look and feel of Arca Launcher.</p></div></div>
                       <label htmlFor="launcher-theme">Active theme</label>
                       <select id="launcher-theme" value={st.theme} disabled={!themesReady} onChange={(e) => {
@@ -1731,7 +1985,30 @@ function AppInner() {
                       {themeError && <p className="setting-note setting-error">{themeError}</p>}
                     </section>
 
-                    <section className="setting-card update-setting-card">
+                    <section className="setting-card maintenance-card" id="settings-maintenance">
+                      <div className="setting-title"><span className="setting-icon"><Icon n="cube" /></span><div><h3>Maintenance</h3><p>Remove launcher data. These actions cannot be undone.</p></div></div>
+                      <div className="maintenance-actions">
+                        <div className="maintenance-row">
+                          <span><b>Delete all instances</b><small>Removes instance folders, including saves, mods, and configs.</small></span>
+                          <button className="mini danger" onClick={() => { setMaintenanceMessage(""); setMaintenanceAction("delete_instances"); }}>Delete</button>
+                        </div>
+                        <div className="maintenance-row">
+                          <span><b>Delete downloaded Java</b><small>Removes only Java runtimes managed by Arca Launcher.</small></span>
+                          <button className="mini danger" onClick={() => { setMaintenanceMessage(""); setMaintenanceAction("delete_java"); }}>Delete</button>
+                        </div>
+                        <div className="maintenance-row">
+                          <span><b>Clean accounts</b><small>Removes saved account credentials and cached skins.</small></span>
+                          <button className="mini danger" onClick={() => { setMaintenanceMessage(""); setMaintenanceAction("clean_accounts"); }}>Clean</button>
+                        </div>
+                        <div className="maintenance-row factory-reset-row">
+                          <span><b>Factory reset</b><small>Deletes instances, downloaded Java, saved accounts, and settings. Shared game assets and the launcher stay.</small></span>
+                          <button className="mini danger" onClick={() => { setMaintenanceMessage(""); setMaintenanceAction("factory_reset"); }}>Reset</button>
+                        </div>
+                      </div>
+                      {maintenanceMessage && <p className={"setting-note" + (maintenanceMessage.startsWith("Could not") ? " setting-error" : " maintenance-success")} role="status">{maintenanceMessage}</p>}
+                    </section>
+
+                    <section className="setting-card update-setting-card" id="settings-updates">
                       <div className="setting-title"><span className="setting-icon"><Icon n="launcher" /></span><div><h3>Launcher updates</h3><p>Review release notes and download the latest build.</p></div></div>
                       <p className={"setting-note" + (launcherUpdate?.update_available ? " update-available" : "")}>
                         {updateCheckBusy
@@ -1748,9 +2025,12 @@ function AppInner() {
                         {updateCheckBusy ? "Checking..." : "Check for updates"}
                       </button>
                     </section>
-                  </div>
-                </div>
 
+                  </div>
+                </div>}
+
+              </div>
+                </div>
               </div>
             </section>
           )}
@@ -1761,6 +2041,10 @@ function AppInner() {
               inst={inst}
               java={java}
               javaMode={st.javaRuntime}
+              showSnapshots={st.showSnapshots}
+              showExperimental={st.showExperimental}
+              showBeta={st.showBeta}
+              showAlpha={st.showAlpha}
               active={page === "mods"}
               onPackInstalled={(list) => {
                 const next = list.map((i) => ({
@@ -1775,6 +2059,36 @@ function AppInner() {
           </div>
         </main>
       </div>
+
+      {maintenanceAction && (
+        <Modal
+          title={MAINTENANCE_DETAILS[maintenanceAction].title}
+          compact
+          onClose={() => { if (!maintenanceBusy) setMaintenanceAction(null); }}
+        >
+          <div className="maintenance-confirm">
+            <p>{MAINTENANCE_DETAILS[maintenanceAction].description}</p>
+            {maintenanceMessage.startsWith("Could not") && (
+              <p className="setting-error" role="alert">{maintenanceMessage}</p>
+            )}
+            {(anyRunning || busy || javaRuntimeBusy || gameRunning) && (
+              <p className="setting-error" role="alert">
+                Finish active downloads, Java downloads, and close Minecraft before running maintenance.
+              </p>
+            )}
+            <footer className="btnrow">
+              <button className="mini" onClick={() => setMaintenanceAction(null)} disabled={maintenanceBusy}>Cancel</button>
+              <button
+                className="mini danger"
+                onClick={() => void runMaintenanceAction()}
+                disabled={maintenanceBusy || anyRunning || busy || javaRuntimeBusy || gameRunning}
+              >
+                {maintenanceBusy ? "Working..." : maintenanceAction === "factory_reset" ? "Reset everything" : "Confirm"}
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
 
       {backgroundPickerOpen && (
         <Modal title="Choose instance background" wide compact overlayClassName="background-picker-overlay" onClose={() => {
@@ -1877,9 +2191,10 @@ function AppInner() {
                   className="desc edittextarea"
                   rows={4}
                   value={editDesc}
-                  onChange={(e) => setEditDesc(e.target.value)}
+                  onChange={(e) => setEditDesc(Array.from(e.target.value).slice(0, 1200).join(""))}
                   placeholder="What's this instance for?"
                 />
+                <span className="description-counter">{Array.from(editDesc).length}/1200</span>
               </div>
 
               <div className="editfield">

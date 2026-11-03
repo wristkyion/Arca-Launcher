@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Inst } from "./mods";
 import { useDownloads } from "./downloads";
@@ -68,7 +69,18 @@ export default function ContentPage({
   const [query, setQuery] = useState("");
   const [showDisabled, setShowDisabled] = useState(true);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [instanceBackground, setInstanceBackground] = useState("");
   const selectedKind = KINDS.find((item) => item.key === kind)!;
+
+  useEffect(() => {
+    let active = true;
+    setInstanceBackground("");
+    if (!inst) return () => { active = false; };
+    void invoke<string | null>("load_instance_background", { id: inst.id })
+      .then((background) => { if (active) setInstanceBackground(background ?? ""); })
+      .catch((error) => { if (active) setErr(`Could not load instance background: ${error}`); });
+    return () => { active = false; };
+  }, [inst?.id]);
 
   const load = async () => {
     if (!inst) {
@@ -144,7 +156,10 @@ export default function ContentPage({
           <p>Create an instance first, then you can manage its mods and packs here.</p>
         </div>
       ) : <>
-        <div className="library-instance-summary">
+        <div
+          className={"library-instance-summary" + (instanceBackground ? " has-background" : "")}
+          style={instanceBackground ? { "--instance-background": `url("${instanceBackground}")` } as CSSProperties & { [key: `--${string}`]: string } : undefined}
+        >
           <InstanceArtwork inst={inst} />
           <div className="library-instance-info">
             <b>{inst.name}</b>

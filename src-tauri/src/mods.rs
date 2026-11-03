@@ -1,6 +1,7 @@
 //! Minecraft content downloads from Modrinth and CurseForge.
 use crate::{content, emit, game, instances, instances::Instance};
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -228,9 +229,17 @@ pub struct Hit {
     pub title: String,
     pub summary: String,
     pub icon: String,
+    pub thumbnail: String,
     pub downloads: u64,
+    pub follows: Option<u64>,
     pub author: String,
     pub url: String,
+    pub updated: String,
+    pub categories: Vec<String>,
+    pub game_versions: Vec<String>,
+    pub loaders: Vec<String>,
+    pub client_side: Option<String>,
+    pub server_side: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -248,11 +257,68 @@ pub struct SearchReq {
     pub sort: String, // relevance | downloads | updated
     pub mc: String,     // "" = any
     pub loader: String, // "" = any
+    #[serde(default)]
+    pub environment: String, // any | client | server | both
     pub offset: u32,
+    #[serde(default = "default_limit")]
+    pub limit: u32,
 }
 
 fn default_sort() -> String {
     "relevance".into()
+}
+
+fn default_limit() -> u32 {
+    20
+}
+
+#[derive(Serialize)]
+pub struct ProjectDetails {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub description: String,
+    pub icon: String,
+    pub thumbnail: String,
+    pub author: String,
+    pub url: String,
+    pub downloads: u64,
+    pub follows: Option<u64>,
+    pub updated: String,
+    pub published: String,
+    pub license: String,
+    pub categories: Vec<String>,
+    pub game_versions: Vec<String>,
+    pub loaders: Vec<String>,
+    pub client_side: Option<String>,
+    pub server_side: Option<String>,
+    pub gallery: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ProjectDetailsReq {
+    pub source: String,
+    pub id: String,
+}
+
+#[tauri::command]
+pub async fn mod_project_details(req: ProjectDetailsReq) -> Result<ProjectDetails, String> {
+    if req.id.is_empty()
+        || req.id.len() > 128
+        || !req
+            .id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err("Invalid project id".into());
+    }
+    let c = game::http();
+    let details = match req.source.as_str() {
+        "modrinth" => mr_project_details_full(&c, &req.id).await,
+        "curseforge" => cf_project_details_full(&c, &req.id).await,
+        source => Err(anyhow!("Unknown source {source}")),
+    };
+    details.map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
@@ -272,6 +338,32 @@ pub async fn mod_search(req: SearchReq) -> Result<SearchResult, String> {
     r.map_err(|e| format!("{e:#}"))
 }
 
+#[tauri::command]
+pub async fn mod_game_versions() -> Result<Vec<GameVersionTag>, String> {
+    let c = game::http();
+    let versions = jget(&c, &format!("{MR}/tag/game_version"), &[], None)
+        .await
+        .map_err(|error| format!("Could not load Minecraft versions: {error:#}"))?;
+    let Some(versions) = versions.as_array() else {
+        return Err("Modrinth returned an invalid Minecraft version list".into());
+    };
+    Ok(versions
+        .iter()
+        .filter_map(|version| {
+            Some(GameVersionTag {
+                version: version["version"].as_str()?.into(),
+                version_type: version["version_type"].as_str().unwrap_or("release").into(),
+            })
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
+pub struct GameVersionTag {
+    pub version: String,
+    pub version_type: String,
+}
+
 async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
     let mut facets = vec![json!([format!("project_type:{}", r.kind)])];
     if !r.mc.is_empty() {
@@ -279,6 +371,12 @@ async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
     }
     if !r.loader.is_empty() {
         facets.push(json!([format!("categories:{}", r.loader)]));
+    }
+    if matches!(r.environment.as_str(), "client" | "both") {
+        facets.push(json!(["client_side:required", "client_side:optional"]));
+    }
+    if matches!(r.environment.as_str(), "server" | "both") {
+        facets.push(json!(["server_side:required", "server_side:optional"]));
     }
     let index = match r.sort.as_str() {
         "downloads" => "downloads",
@@ -288,7 +386,7 @@ async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
     let q = vec![
         ("query", r.query.clone()),
         ("facets", Value::Array(facets).to_string()),
-        ("limit", "20".to_string()),
+        ("limit", r.limit.clamp(1, 100).to_string()),
         ("offset", r.offset.to_string()),
         ("index", index.to_string()),
     ];
@@ -302,13 +400,34 @@ async fn mr_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
             title: h["title"].as_str().unwrap_or("").into(),
             summary: h["description"].as_str().unwrap_or("").into(),
             icon: h["icon_url"].as_str().unwrap_or("").into(),
+            thumbnail: h["featured_gallery"].as_str().unwrap_or("").into(),
             downloads: h["downloads"].as_u64().unwrap_or(0),
+            follows: h["follows"].as_u64(),
             author: h["author"].as_str().unwrap_or("").into(),
             url: format!(
                 "https://modrinth.com/{}/{}",
                 h["project_type"].as_str().unwrap_or("mod"),
                 h["slug"].as_str().unwrap_or("")
             ),
+            updated: h["date_modified"].as_str().unwrap_or("").into(),
+            categories: h["display_categories"]
+                .as_array()
+                .or_else(|| h["categories"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect(),
+            game_versions: h["game_versions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect(),
+            loaders: version_loaders(&h["categories"]),
+            client_side: h["client_side"].as_str().map(String::from),
+            server_side: h["server_side"].as_str().map(String::from),
         })
         .collect();
     Ok(SearchResult {
@@ -325,48 +444,216 @@ async fn cf_search(c: &reqwest::Client, r: &SearchReq) -> Result<SearchResult> {
         "shader" => 6552,
         other => return Err(anyhow!("Unknown content kind {other}")),
     };
-    let mut q = vec![
-        ("gameId", "432".to_string()),
-        ("classId", class.to_string()),
-        ("searchFilter", r.query.clone()),
-        ("pageSize", "20".to_string()),
-        ("index", r.offset.to_string()),
-    ];
-    match r.sort.as_str() {
-        "downloads" => {
-            q.push(("sortField", "6".to_string()));
-            q.push(("sortOrder", "desc".to_string()));
+    let limit = r.limit.clamp(1, 100);
+    let mut index = r.offset;
+    let mut data = Vec::new();
+    let mut total = 0;
+    while data.len() < limit as usize {
+        let page_size = (limit as usize - data.len()).min(50);
+        let mut q = vec![
+            ("gameId", "432".to_string()),
+            ("classId", class.to_string()),
+            ("searchFilter", r.query.clone()),
+            ("pageSize", page_size.to_string()),
+            ("index", index.to_string()),
+        ];
+        match r.sort.as_str() {
+            "downloads" => {
+                q.push(("sortField", "6".to_string()));
+                q.push(("sortOrder", "desc".to_string()));
+            }
+            "updated" => {
+                q.push(("sortField", "3".to_string()));
+                q.push(("sortOrder", "desc".to_string()));
+            }
+            _ => {}
         }
-        "updated" => {
-            q.push(("sortField", "3".to_string()));
-            q.push(("sortOrder", "desc".to_string()));
+        if !r.mc.is_empty() {
+            q.push(("gameVersion", r.mc.clone()));
         }
-        _ => {}
+        if let Some(t) = cf_loader(&r.loader) {
+            q.push(("modLoaderType", t.to_string()));
+        }
+        let response = jget(c, &format!("{CF}/mods/search"), &q, None).await?;
+        total = response["pagination"]["totalCount"].as_u64().unwrap_or(0);
+        let Some(page) = response["data"].as_array() else {
+            break;
+        };
+        let count = page.len();
+        data.extend(page.iter().cloned());
+        index += count as u32;
+        if count < page_size {
+            break;
+        }
     }
-    if !r.mc.is_empty() {
-        q.push(("gameVersion", r.mc.clone()));
-    }
-    if let Some(t) = cf_loader(&r.loader) {
-        q.push(("modLoaderType", t.to_string()));
-    }
-    let v = jget(c, &format!("{CF}/mods/search"), &q, None).await?;
-    let hits = v["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let hits = data
+        .iter()
         .map(|h| Hit {
             id: h["id"].as_u64().unwrap_or(0).to_string(),
             title: h["name"].as_str().unwrap_or("").into(),
             summary: h["summary"].as_str().unwrap_or("").into(),
             icon: h["logo"]["thumbnailUrl"].as_str().unwrap_or("").into(),
+            thumbnail: if r.kind == "modpack" {
+                h["screenshots"][0]["thumbnailUrl"]
+                    .as_str()
+                    .or_else(|| h["screenshots"][0]["url"].as_str())
+                    .unwrap_or("")
+                    .into()
+            } else {
+                String::new()
+            },
             downloads: h["downloadCount"].as_f64().unwrap_or(0.0) as u64,
+            follows: None,
             author: h["authors"][0]["name"].as_str().unwrap_or("").into(),
             url: h["links"]["websiteUrl"].as_str().unwrap_or("").into(),
+            updated: h["dateModified"].as_str().unwrap_or("").into(),
+            categories: h["categories"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|category| category["name"].as_str())
+                .map(String::from)
+                .collect(),
+            game_versions: h["latestFilesIndexes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|file| file["gameVersion"].as_str())
+                .map(String::from)
+                .collect(),
+            loaders: h["latestFilesIndexes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|file| file["modLoader"].as_i64())
+                .filter_map(cf_loader_name)
+                .map(String::from)
+                .collect(),
+            client_side: None,
+            server_side: None,
         })
         .collect();
-    Ok(SearchResult {
-        hits,
-        total: v["pagination"]["totalCount"].as_u64().unwrap_or(0),
+    Ok(SearchResult { hits, total })
+}
+
+fn cf_loader_name(loader: i64) -> Option<&'static str> {
+    match loader {
+        1 => Some("forge"),
+        4 => Some("fabric"),
+        5 => Some("quilt"),
+        6 => Some("neoforge"),
+        _ => None,
+    }
+}
+
+async fn mr_project_details_full(c: &reqwest::Client, id: &str) -> Result<ProjectDetails> {
+    let project = jget(c, &format!("{MR}/project/{id}"), &[], None).await?;
+    let string_list = |key: &str| {
+        project[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    Ok(ProjectDetails {
+        id: project["id"].as_str().unwrap_or(id).into(),
+        title: project["title"].as_str().unwrap_or(id).into(),
+        summary: project["description"].as_str().unwrap_or("").into(),
+        description: project["body"].as_str().unwrap_or("").into(),
+        icon: project["icon_url"].as_str().unwrap_or("").into(),
+        thumbnail: project["featured_gallery"].as_str().unwrap_or("").into(),
+        author: String::new(),
+        url: format!(
+            "https://modrinth.com/{}/{}",
+            project["project_type"].as_str().unwrap_or("mod"),
+            project["slug"].as_str().unwrap_or(id)
+        ),
+        downloads: project["downloads"].as_u64().unwrap_or(0),
+        follows: project["followers"].as_u64(),
+        updated: project["updated"].as_str().unwrap_or("").into(),
+        published: project["published"].as_str().unwrap_or("").into(),
+        license: project["license"]["name"].as_str().unwrap_or("").into(),
+        categories: string_list("categories"),
+        game_versions: string_list("game_versions"),
+        loaders: version_loaders(&project["loaders"]),
+        client_side: project["client_side"].as_str().map(String::from),
+        server_side: project["server_side"].as_str().map(String::from),
+        gallery: project["gallery"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|image| image["url"].as_str())
+            .map(String::from)
+            .collect(),
+    })
+}
+
+async fn cf_project_details_full(c: &reqwest::Client, id: &str) -> Result<ProjectDetails> {
+    let project = jget(c, &format!("{CF}/mods/{id}"), &[], None).await?;
+    let description = jget(c, &format!("{CF}/mods/{id}/description"), &[], None).await?;
+    let description = description["data"]
+        .as_str()
+        .ok_or_else(|| anyhow!("CurseForge returned no project description"))?
+        .to_string();
+    let data = &project["data"];
+    let authors = data["authors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|author| author["name"].as_str())
+        .collect::<Vec<_>>();
+    let categories = data["categories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|category| category["name"].as_str())
+        .map(String::from)
+        .collect();
+    let files = data["latestFilesIndexes"].as_array();
+    let game_versions = files
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file["gameVersion"].as_str())
+        .map(String::from)
+        .collect::<Vec<_>>();
+    let loaders = files
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file["modLoader"].as_i64())
+        .filter_map(cf_loader_name)
+        .map(String::from)
+        .collect::<Vec<_>>();
+    Ok(ProjectDetails {
+        id: data["id"]
+            .as_u64()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| id.into()),
+        title: data["name"].as_str().unwrap_or(id).into(),
+        summary: data["summary"].as_str().unwrap_or("").into(),
+        description,
+        icon: data["logo"]["thumbnailUrl"].as_str().unwrap_or("").into(),
+        thumbnail: String::new(),
+        author: authors.join(", "),
+        url: data["links"]["websiteUrl"].as_str().unwrap_or("").into(),
+        downloads: data["downloadCount"].as_f64().unwrap_or(0.0) as u64,
+        follows: None,
+        updated: data["dateModified"].as_str().unwrap_or("").into(),
+        published: data["dateCreated"].as_str().unwrap_or("").into(),
+        license: String::new(),
+        categories,
+        game_versions,
+        loaders,
+        client_side: None,
+        server_side: None,
+        gallery: data["screenshots"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|image| image["url"].as_str())
+            .map(String::from)
+            .collect(),
     })
 }
 
@@ -1176,6 +1463,12 @@ pub struct PackReq {
     pub source: String,
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub thumbnail_url: String,
     pub java: String,
     #[serde(default)]
     pub task_id: String,
@@ -1185,6 +1478,82 @@ pub struct PackReq {
 
 fn default_java_runtime() -> String {
     "system".into()
+}
+
+const MAX_PACK_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
+
+fn pack_thumbnail_url_is_allowed(source: &str, value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    let allowed_host = match source {
+        "modrinth" => url.host_str() == Some("cdn.modrinth.com"),
+        "curseforge" => url.host_str() == Some("media.forgecdn.net"),
+        _ => false,
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && allowed_host
+}
+
+async fn save_pack_thumbnail(source: &str, url: &str, instance_dir: &Path) -> Result<String> {
+    if !pack_thumbnail_url_is_allowed(source, url) {
+        return Err(anyhow!(
+            "The modpack thumbnail URL is not from its trusted image host"
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "The modpack thumbnail server answered {}",
+            response.status()
+        ));
+    }
+
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "image/gif" | "image/png" | "image/jpeg"))
+        .ok_or_else(|| anyhow!("The modpack thumbnail is not a supported image"))?
+        .to_string();
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PACK_THUMBNAIL_BYTES as u64)
+    {
+        return Err(anyhow!(
+            "The modpack thumbnail exceeds the 8 MiB size limit"
+        ));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len() + chunk.len() > MAX_PACK_THUMBNAIL_BYTES {
+            return Err(anyhow!(
+                "The modpack thumbnail exceeds the 8 MiB size limit"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(anyhow!("The modpack thumbnail is empty"));
+    }
+
+    let data_url = format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    );
+    instances::save_background(instance_dir, &data_url).map_err(|error| anyhow!(error))
 }
 
 #[tauri::command]
@@ -1477,18 +1846,35 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     // 5. config files, resource packs etc. shipped inside the pack
     extract_overrides(&archive, &plan.overrides, inst)?;
 
+    let background = if req.thumbnail_url.trim().is_empty() {
+        String::new()
+    } else {
+        match save_pack_thumbnail(&req.source, &req.thumbnail_url, inst).await {
+            Ok(filename) => filename,
+            Err(error) => {
+                emit(
+                    &app,
+                    format!("Warning: could not set the modpack thumbnail as the instance background: {error:#}"),
+                );
+                String::new()
+            }
+        }
+    };
+    let description: String = req.description.chars().take(1200).collect();
     let instance = Instance {
         id: id.clone(),
         name,
         loader: plan.loader,
         mc: plan.mc,
         version_id,
-        icon: String::new(),
-        description: String::new(),
-        background: String::new(),
+        icon: req.icon,
+        description,
+        background,
     };
     instances::write_one(inst, &instance).map_err(|e| anyhow!("{e}"))?;
-    staged.commit(&destination).map_err(|error| anyhow!(error))?;
+    staged
+        .commit(&destination)
+        .map_err(|error| anyhow!(error))?;
     emit(&app, "Instance ready");
     let mut list = instances::scan_all(&instance_root);
     list.retain(|i| i.id != id);
@@ -1498,7 +1884,10 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_curseforge_proxy_url, version_game_versions, version_loaders};
+    use super::{
+        cf_loader_name, default_limit, map_curseforge_proxy_url, pack_thumbnail_url_is_allowed,
+        version_game_versions, version_loaders,
+    };
     use serde_json::json;
 
     #[test]
@@ -1518,5 +1907,43 @@ mod tests {
             "https://proxy.example/v1/mods/search"
         );
         assert!(map_curseforge_proxy_url("http://proxy.example/v1", "/mods/search").is_err());
+    }
+
+    #[test]
+    fn maps_curseforge_modloader_ids() {
+        assert_eq!(cf_loader_name(1), Some("forge"));
+        assert_eq!(cf_loader_name(4), Some("fabric"));
+        assert_eq!(cf_loader_name(5), Some("quilt"));
+        assert_eq!(cf_loader_name(6), Some("neoforge"));
+        assert_eq!(cf_loader_name(0), None);
+    }
+
+    #[test]
+    fn defaults_search_page_size_to_twenty() {
+        assert_eq!(default_limit(), 20);
+    }
+
+    #[test]
+    fn only_accepts_provider_thumbnail_urls_over_https() {
+        assert!(pack_thumbnail_url_is_allowed(
+            "modrinth",
+            "https://cdn.modrinth.com/data/project/icon.png"
+        ));
+        assert!(pack_thumbnail_url_is_allowed(
+            "curseforge",
+            "https://media.forgecdn.net/files/project/image.jpg"
+        ));
+        assert!(!pack_thumbnail_url_is_allowed(
+            "modrinth",
+            "http://cdn.modrinth.com/data/project/icon.png"
+        ));
+        assert!(!pack_thumbnail_url_is_allowed(
+            "modrinth",
+            "https://cdn.modrinth.com.evil.example/image.png"
+        ));
+        assert!(!pack_thumbnail_url_is_allowed(
+            "curseforge",
+            "https://example.com/image.png"
+        ));
     }
 }

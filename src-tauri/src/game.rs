@@ -300,11 +300,8 @@ pub async fn install_loader(
         }
 
         "neoforge" => {
-            let rest = mc
-                .strip_prefix("1.")
-                .ok_or_else(|| anyhow!("NeoForge needs Minecraft 1.20.2+"))?;
-            let mut it = rest.split('.');
-            let prefix = format!("{}.{}.", it.next().unwrap_or("0"), it.next().unwrap_or("0"));
+            let prefix = neoforge_version_prefix(mc)
+                .ok_or_else(|| anyhow!("NeoForge does not support Minecraft {mc}"))?;
             let all = get_json(
                 c,
                 "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge",
@@ -328,6 +325,36 @@ pub async fn install_loader(
         }
 
         other => Err(anyhow!("Unknown loader {other}")),
+    }
+}
+
+fn neoforge_version_prefix(mc: &str) -> Option<String> {
+    let mut parts = mc.split('.');
+    let first = parts.next()?.parse::<u32>().ok()?;
+    let second_part = parts.next()?;
+    let second = second_part
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse::<u32>()
+        .ok()?;
+
+    if first == 1 {
+        let patch_part = parts.next()?;
+        let patch = patch_part
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()?;
+        if second < 20 || (second == 20 && patch < 2) {
+            return None;
+        }
+        Some(format!("{second}.{patch}."))
+    } else if first >= 26 {
+        Some(format!("{first}.{second}."))
+    } else {
+        None
     }
 }
 
@@ -864,7 +891,8 @@ fn expand_jvm_arg(a: &Value, vars: &HashMap<&str, String>, id: &str, jar_id: &st
 #[cfg(test)]
 mod launch_argument_tests {
     use super::{
-        expand, expand_jvm_arg, forge_installer_urls, legacy_client_version, maven_path, sha1_file,
+        expand, expand_jvm_arg, forge_installer_urls, legacy_client_version, maven_path,
+        neoforge_version_prefix, sha1_file,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -883,6 +911,20 @@ mod launch_argument_tests {
             expand(&json!("${version_name}"), &vars),
             ["neoforge-21.1.262"]
         );
+    }
+
+    #[test]
+    fn neoforge_version_prefix_supports_legacy_and_current_minecraft_versions() {
+        assert_eq!(neoforge_version_prefix("1.20.2"), Some("20.2.".into()));
+        assert_eq!(neoforge_version_prefix("1.21.1"), Some("21.1.".into()));
+        assert_eq!(neoforge_version_prefix("1.20.1"), None);
+        assert_eq!(neoforge_version_prefix("1.19.4"), None);
+        assert_eq!(neoforge_version_prefix("26.1"), Some("26.1.".into()));
+        assert_eq!(
+            neoforge_version_prefix("26.1-snapshot-1"),
+            Some("26.1.".into())
+        );
+        assert_eq!(neoforge_version_prefix("25.4"), None);
     }
 
     #[test]
@@ -1324,23 +1366,17 @@ pub async fn loader_support(mc: &str) -> Vec<String> {
     if forge_ok {
         out.push("forge".into());
     }
-    let neo_ok = match &neo {
-        Ok(v) => match mc.strip_prefix("1.") {
-            Some(rest) => {
-                let mut it = rest.split('.');
-                let prefix = format!("{}.{}.", it.next().unwrap_or("0"), it.next().unwrap_or("0"));
-                v["versions"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str())
-                            .any(|x| x.starts_with(&prefix))
-                    })
-                    .unwrap_or(false)
-            }
-            None => false,
-        },
-        Err(_) => true,
+    let neo_ok = match (neoforge_version_prefix(mc), &neo) {
+        (Some(prefix), Ok(v)) => v["versions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .any(|x| x.starts_with(&prefix))
+            })
+            .unwrap_or(false),
+        (Some(_), Err(_)) => true,
+        (None, _) => false,
     };
     if neo_ok {
         out.push("neoforge".into());

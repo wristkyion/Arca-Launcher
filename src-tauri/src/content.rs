@@ -349,7 +349,11 @@ pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
             .filter(|c| c.size == size && c.modified_secs == mtime);
 
         let (parsed_name, description, parsed_icon) = if let Some(cached) = cached {
-            (cached.name.clone(), cached.description.clone(), cached.icon.clone())
+            (
+                cached.name.clone(),
+                cached.description.clone(),
+                cached.icon.clone(),
+            )
         } else {
             let parsed = if kind == "mods" && original_name.to_lowercase().ends_with(".jar") {
                 let (mod_name, mod_description, mod_icon) = mod_metadata(&path);
@@ -375,7 +379,11 @@ pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
             parsed
         };
 
-        let mut name = if saved.project_name.is_empty() { parsed_name } else { saved.project_name.clone() };
+        let mut name = if saved.project_name.is_empty() {
+            parsed_name
+        } else {
+            saved.project_name.clone()
+        };
         let mut icon = saved.icon.clone();
         if icon.is_empty() {
             icon = parsed_icon;
@@ -408,8 +416,10 @@ pub fn list(inst_dir: &Path, kind: &str) -> Result<Vec<ContentItem>> {
 
     if cache_dirty {
         // Drop entries for files that no longer exist so the cache doesn't grow forever.
-        let present: std::collections::HashSet<&str> =
-            out.iter().map(|item| canonical_name(&item.file_name)).collect();
+        let present: std::collections::HashSet<&str> = out
+            .iter()
+            .map(|item| canonical_name(&item.file_name))
+            .collect();
         folder_cache.retain(|name, _| present.contains(name.as_str()));
         cache.insert(folder_key.to_string(), folder_cache);
         save_cache(inst_dir, &cache);
