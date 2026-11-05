@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import ModsPage from "./mods";
@@ -15,10 +16,11 @@ import CrashWatcher from "./CrashWatcher";
 import "./styles.css";
 
 type Page = "play" | "account" | "versions" | "mods" | "console" | "settings";
-type Acc = { id: string; kind: string; username: string; uuid: string };
+type Acc = { id: string; kind: string; username: string; uuid: string; custom_icon?: string | null; custom_background?: string | null };
 type AccList = { selected: string | null; accounts: Acc[] };
 type VersionInfo = { id: string; kind: string };
 type Instance = { id: string; name: string; loader: string; mc: string; version_id: string; icon: string; description: string; background: string };
+type InstanceArchiveInfo = { has_metadata: boolean; name: string; loader: string; mc: string };
 type ThemeInfo = { id: string; name: string; author: string; builtin: boolean };
 type ThemeCatalog = { themes: ThemeInfo[]; warnings: string[] };
 type ThemeStylesheet = { id: string; name: string; author: string; css: string };
@@ -48,6 +50,13 @@ const MAINTENANCE_DETAILS: Record<MaintenanceAction, { title: string; descriptio
   },
 };
 type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
+declare global {
+  interface Window {
+    __arcaShowStartupWizard?: () => void;
+  }
+}
+const INSTANCE_EDIT_ICON = new URL("../assets/icons/edit.svg", import.meta.url).href;
+const getPortalRoot = () => document.getElementById("portals") ?? document.body;
 const BUILTIN_THEMES: ThemeInfo[] = [
   { id: "builtin:default", name: "Default", author: "Built-in", builtin: true },
   { id: "builtin:minimal", name: "Minimal", author: "Built-in", builtin: true },
@@ -92,6 +101,36 @@ type ChangelogEntry =
   | { v: string; title: string; items: string[] };
 
 const CHANGELOG: ChangelogEntry[] = [
+  {
+    v: "0.2.1",
+    title: "Huge Update",
+    sections: [
+      {
+        title: "Instance management",
+        items: [
+          "Added multi-select instance deletion with a two-step confirmation.",
+          "Added instance ZIP export and import, including a setup flow for archives without instances.json.",
+          "Added support for importing Modrinth .mrpack files.",
+          "Added task-panel progress and completion or error status for archive imports and exports.",
+        ],
+      },
+      {
+        title: "Library and downloader",
+        items: [
+          "Reworked Installed Content with category navigation, search, refreshed icons, and smoother category transitions.",
+          "Added loading overlays for Installed Content and downloader searches.",
+          "Improved instance search, refresh, and selection controls.",
+        ],
+      },
+      {
+        title: "Polish",
+        items: [
+          "Updated instance actions with compact icon buttons and consistent hover behavior.",
+          "Improved selection checkboxes and refreshed content controls.",
+        ],
+      },
+    ],
+  },
   {
     v: "0.2.0",
     title: "Power",
@@ -245,17 +284,18 @@ function BgPreview({ src, className }: { src: string; className?: string }) {
 }
 
 /** A simple centered dialog with a dark scrim backdrop. Click outside or the ✕ to close. */
-function Modal({ title, onClose, children, wide = false, compact = false, overlayClassName = "" }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean; compact?: boolean; overlayClassName?: string }) {
-  return (
+function Modal({ title, onClose, children, wide = false, compact = false, hideClose = false, overlayClassName = "" }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean; compact?: boolean; hideClose?: boolean; overlayClassName?: string }) {
+  return createPortal(
     <div className={"app-modal-backdrop" + (overlayClassName ? ` ${overlayClassName}` : "")} onClick={onClose}>
       <div className={"app-modal-card" + (wide ? " wide" : "") + (compact ? " compact" : "")} onClick={(e) => e.stopPropagation()}>
         <div className="app-modal-header">
           <h3 className="app-modal-title">{title}</h3>
-          <button className="mini" onClick={onClose}>✕</button>
+          {!hideClose && <button className="mini" onClick={onClose}>✕</button>}
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    getPortalRoot(),
   );
 }
 
@@ -336,10 +376,16 @@ function Cube({ tex, tw, th, s, g, d, o, at }:
 }
 
 /** 3D skin preview. Starts viewed from the top-left; drag to rotate, double-click to reset. */
-function SkinModel({ data, slim, s = 5 }: { data: string; slim: boolean; s?: number }) {
+function SkinModel({ data, slim, s = 5, className, initialRotation }: {
+  data: string;
+  slim: boolean;
+  s?: number;
+  className?: string;
+  initialRotation?: { x: number; y: number };
+}) {
   const HOME = { x: -24, y: 32 }; // x: tilt (negative = camera above), y: turn (positive = camera to the left)
   const [dim, setDim] = useState<[number, number]>([64, 64]);
-  const [rot, setRot] = useState(HOME);
+  const [rot, setRot] = useState(initialRotation ?? HOME);
 
   useEffect(() => {
     const i = new Image();
@@ -355,7 +401,7 @@ function SkinModel({ data, slim, s = 5 }: { data: string; slim: boolean; s?: num
   const ax = 4 + aw / 2;
 
   return (
-    <div className="stage">
+    <div className={"stage" + (className ? ` ${className}` : "")}>
       <div className="rig" style={{ "--rig-transform": `rotateX(${rot.x}deg) rotateY(${rot.y}deg)` } as CSSVars}>
         <Cube {...c} g={[8, 8, 8]} d={[8, 8, 8]} o={[0, 0]} at={[0, -10 - Y, 0]} />
         <Cube {...c} g={[9, 9, 9]} d={[8, 8, 8]} o={[32, 0]} at={[0, -10 - Y, 0]} />
@@ -377,6 +423,7 @@ function SkinModel({ data, slim, s = 5 }: { data: string; slim: boolean; s?: num
 }
 
 function Avatar({ acc, skin }: { acc: Acc; skin: Skin }) {
+  if (acc.custom_icon) return <img className="avimg custom-account-avatar" src={acc.custom_icon} alt="" />;
   if (skin?.data) return <SkinCanvas url={skin.data} slim={skin.slim} head height={36} />;
   if (acc.kind === "offline")
     return <img className="avimg" src={`https://mc-heads.net/avatar/${encodeURIComponent(acc.username)}/36`} alt=""
@@ -485,7 +532,7 @@ function AppInner() {
       return new URLSearchParams(window.location.search).get("window") === "splash";
     }
   })();
-  const { configureDownloads, installInstance, startMigration, anyRunning } = useDownloads();
+  const { configureDownloads, installInstance, startMigration, startTask, anyRunning } = useDownloads();
   const [contentInst, setContentInst] = useState<Instance | null>(null);
   const [page, setPageNow] = useState<Page>("play");
   const [fade, setFade] = useState<"in" | "out">("in");
@@ -519,9 +566,14 @@ function AppInner() {
   // accounts
   const [accounts, setAccounts] = useState<Acc[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [focusedAccountId, setFocusedAccountId] = useState<string | null>(null);
+  const [addAccountOpen, setAddAccountOpen] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [addKind, setAddKind] = useState("offline");
   const [addUser, setAddUser] = useState("");
   const [addPass, setAddPass] = useState("");
+  const [addAccountIcon, setAddAccountIcon] = useState("");
+  const [addAccountBackground, setAddAccountBackground] = useState("");
   const [addBusy, setAddBusy] = useState(false);
   const [addErr, setAddErr] = useState("");
   const [homeAccountPickerOpen, setHomeAccountPickerOpen] = useState(false);
@@ -560,7 +612,17 @@ function AppInner() {
   const [editIcon, setEditIcon] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editBg, setEditBg] = useState("");
-  const [delId, setDelId] = useState<string | null>(null);
+  const [instanceSelectionMode, setInstanceSelectionMode] = useState(false);
+  const [selectedInstanceIds, setSelectedInstanceIds] = useState<string[]>([]);
+  const [deleteInstancesConfirm, setDeleteInstancesConfirm] = useState<"warning" | "confirm" | null>(null);
+  const [deleteInstancesBusy, setDeleteInstancesBusy] = useState(false);
+  const [instancesRefreshing, setInstancesRefreshing] = useState(false);
+  const [instanceActionError, setInstanceActionError] = useState("");
+  const [instanceImportBusy, setInstanceImportBusy] = useState(false);
+  const [importArchivePath, setImportArchivePath] = useState<string | null>(null);
+  const [importName, setImportName] = useState("");
+  const [importLoader, setImportLoader] = useState("vanilla");
+  const [importMc, setImportMc] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   // versions + settings
@@ -613,6 +675,15 @@ function AppInner() {
   const logRef = useRef<HTMLDivElement>(null);
   const [winH, setWinH] = useState(window.innerHeight);
 
+  useEffect(() => {
+    if (!addAccountOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !addBusy) setAddAccountOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [addAccountOpen, addBusy]);
+
   const add = (s: string) =>
     setActivityLog((l) => {
       const prog = /^(Assets|Libraries) \d+\/\d+/;
@@ -622,7 +693,7 @@ function AppInner() {
     });
   const addGameLog = (line: string) => setLog((lines) => [...lines.slice(-400), line]);
 
-  const applyList = (r: AccList) => { setAccounts(r.accounts); setSelected(r.selected); setSkinFail(false); };
+  const applyList = (r: AccList) => { setAccounts(r.accounts); setSelected(r.selected); setFocusedAccountId(r.selected); setSkinFail(false); };
 
   const loadVersions = () =>
     invoke<VersionInfo[]>("mc_versions")
@@ -800,6 +871,24 @@ function AppInner() {
   }, [settingsLoaded, startup]);
 
   useEffect(() => {
+    const showStartupWizard = () => {
+      setFirstRunStep(0);
+      setFirstRunError("");
+      setAddErr("");
+      setAddUser("");
+      setAddPass("");
+      setMsCode(null);
+      setFirstRunOpen(true);
+    };
+    window.__arcaShowStartupWizard = showStartupWizard;
+    return () => {
+      if (window.__arcaShowStartupWizard === showStartupWizard) {
+        delete window.__arcaShowStartupWizard;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     configureDownloads(st.downloadConcurrency, st.autoClearDownloads);
   }, [configureDownloads, st.downloadConcurrency, st.autoClearDownloads]);
 
@@ -867,10 +956,10 @@ function AppInner() {
     return () => { dead = true; };
   }, [wMc]);
 
-  // Ely.by / Microsoft skins come from their own servers (via the backend)
+  // Load skin textures through the backend so every account uses the same 3D viewer.
   useEffect(() => {
     accounts.forEach((a) => {
-      if (a.kind === "offline" || fetchedSkins.current.has(a.id)) return;
+      if (fetchedSkins.current.has(a.id)) return;
       fetchedSkins.current.add(a.id);
       invoke<Skin>("get_skin", { kind: a.kind, username: a.username, uuid: a.uuid })
         .then((sk) => {
@@ -883,6 +972,8 @@ function AppInner() {
 
   const inst = instances.find((i) => i.id === instId) ?? null;
   const current = accounts.find((a) => a.id === selected) ?? null;
+  const focusedAccount = accounts.find((a) => a.id === focusedAccountId) ?? current ?? accounts[0] ?? null;
+  const focusedSkin = focusedAccount ? skins[focusedAccount.id] ?? null : null;
   const effRam = st.ramAuto ? autoRam(sysRam, inst?.loader ?? "vanilla") : ram;
 
   useEffect(() => {
@@ -956,6 +1047,7 @@ function AppInner() {
     if (root) {
       (root.style as any).zoom = String(isSplashWindow ? 1 : st.uiScale / 100);
     }
+    document.getElementById("portals")?.style.setProperty("--modal-ui-scale", String(isSplashWindow ? 1 : st.uiScale / 100));
     document.body.className = st.reduceAnimations ? "reduce-animations" : "";
   }, [st.uiScale, st.reduceAnimations, isSplashWindow]);
 
@@ -1002,12 +1094,29 @@ function AppInner() {
     setAddErr("");
     setMsCode(null);
     try {
-      const r = await invoke<AccList>("add_account", {
-        req: { kind: addKind, username: addUser, password: addPass },
-      });
+      const r = editingAccountId
+        ? await invoke<AccList>("update_account_profile", {
+          req: {
+            id: editingAccountId,
+            custom_icon: addAccountIcon || null,
+            custom_background: addAccountBackground || null,
+          },
+        })
+        : await invoke<AccList>("add_account", {
+          req: {
+            kind: addKind,
+            username: addUser,
+            password: addPass,
+            custom_icon: addAccountIcon || null,
+            custom_background: addAccountBackground || null,
+          },
+        });
       applyList(r);
       setAddUser("");
       setAddPass("");
+      setAddAccountIcon("");
+      setAddAccountBackground("");
+      setEditingAccountId(null);
       return true;
     } catch (e) {
       setAddErr(String(e));
@@ -1016,6 +1125,20 @@ function AppInner() {
       setAddBusy(false);
       setMsCode(null);
     }
+  };
+  const openAddAccount = () => {
+    setEditingAccountId(null);
+    setAddAccountIcon("");
+    setAddAccountBackground("");
+    setAddErr("");
+    setAddAccountOpen(true);
+  };
+  const openEditAccount = (account: Acc) => {
+    setEditingAccountId(account.id);
+    setAddAccountIcon(account.custom_icon ?? "");
+    setAddAccountBackground(account.custom_background ?? "");
+    setAddErr("");
+    setAddAccountOpen(true);
   };
   const firstRunLogin = async () => {
     setFirstRunError("");
@@ -1184,7 +1307,7 @@ function AppInner() {
   const startEdit = async (i: Instance) => {
     setEditId(null);
     setEditName(i.name); setEditIcon(i.icon);
-    setEditDesc(i.description); setEditBg(""); setDelId(null);
+    setEditDesc(i.description); setEditBg("");
     try {
       setEditBg(await invoke<string | null>("load_instance_background", { id: i.id }) ?? "");
       setEditId(i.id);
@@ -1201,28 +1324,172 @@ function AppInner() {
         req: { id: editedId, name: editName, icon: editIcon, description: editDesc, background: editBg },
       });
       setInstances(updated);
+      setContentInst((current) => current?.id === editedId
+        ? updated.find((instance) => instance.id === editedId) ?? current
+        : current);
       if (editedId === instId) setActiveBackground(editBg);
       setEditId(null);
     } catch (e) { add(`ERROR: ${e}`); setPage("console"); }
   };
-  const removeInst = async (id: string, deleteFiles: boolean) => {
+  const toggleInstanceSelection = (id: string) => {
+    setSelectedInstanceIds((selectedIds) => selectedIds.includes(id)
+      ? selectedIds.filter((selectedId) => selectedId !== id)
+      : [...selectedIds, id]);
+  };
+  const cancelInstanceSelection = () => {
+    setInstanceSelectionMode(false);
+    setSelectedInstanceIds([]);
+  };
+  const refreshInstances = async () => {
+    if (instancesRefreshing) return;
+    setInstancesRefreshing(true);
     try {
-      const l = await invoke<Instance[]>("remove_instance", { req: { id, delete_files: deleteFiles } });
-      setInstances(l);
-      if (instId === id) setInstId(l[0]?.id ?? "");
-      setDelId(null);
-    } catch (e) { add(`ERROR: ${e}`); setPage("console"); }
+      const [refreshed] = await Promise.all([
+        invoke<Instance[]>("list_instances"),
+        new Promise((resolve) => window.setTimeout(resolve, 650)),
+      ]);
+      setInstances(refreshed);
+      setInstId((current) => refreshed.some((instance) => instance.id === current)
+        ? current
+        : refreshed[0]?.id ?? "");
+      setSelectedInstanceIds((selectedIds) => selectedIds.filter((id) =>
+        refreshed.some((instance) => instance.id === id)));
+      setContentInst((current) => current && refreshed.some((instance) => instance.id === current.id)
+        ? refreshed.find((instance) => instance.id === current.id) ?? current
+        : current ? null : current);
+      setInstanceActionError("");
+    } catch (error) {
+      setInstanceActionError(`Could not refresh instances: ${error}`);
+    } finally {
+      setInstancesRefreshing(false);
+    }
+  };
+  const removeSelectedInstances = async () => {
+    const ids = selectedInstanceIds.filter((id) => instances.some((instance) => instance.id === id));
+    if (!ids.length) {
+      setDeleteInstancesConfirm(null);
+      return;
+    }
+    setDeleteInstancesBusy(true);
+    setInstanceActionError("");
+    try {
+      const updated = await invoke<Instance[]>("remove_instances", { req: { ids } });
+      setInstances(updated);
+      if (ids.includes(instId)) setInstId(updated[0]?.id ?? "");
+      if (contentInst && ids.includes(contentInst.id)) setContentInst(null);
+      cancelInstanceSelection();
+      setDeleteInstancesConfirm(null);
+    } catch (error) {
+      setInstanceActionError(String(error));
+      add(`ERROR: ${error}`);
+      try {
+        const refreshed = await invoke<Instance[]>("list_instances");
+        setInstances(refreshed);
+        setSelectedInstanceIds((selectedIds) => selectedIds.filter((id) => refreshed.some((instance) => instance.id === id)));
+        if (ids.includes(instId) && !refreshed.some((instance) => instance.id === instId)) {
+          setInstId(refreshed[0]?.id ?? "");
+        }
+        if (contentInst && ids.includes(contentInst.id) && !refreshed.some((instance) => instance.id === contentInst.id)) {
+          setContentInst(null);
+        }
+      } catch (refreshError) {
+        add(`ERROR: Could not refresh instances after deletion: ${refreshError}`);
+      }
+    } finally {
+      setDeleteInstancesBusy(false);
+    }
+  };
+  const importZipArchive = async (path: string, fallback?: { name: string; loader: string; mc: string }) => {
+    setInstanceImportBusy(true);
+    setInstanceActionError("");
+    try {
+      await startTask(fallback ? `Importing ${fallback.name}` : "Importing instance", "", async (taskId) => {
+        const updated = await invoke<Instance[]>("import_instance_archive", {
+          req: {
+            path,
+            fallback_name: fallback?.name ?? "",
+            fallback_loader: fallback?.loader ?? "vanilla",
+            fallback_mc: fallback?.mc ?? "",
+            java: java || "java",
+            java_mode: st.javaRuntime,
+            task_id: taskId,
+          },
+        });
+        setInstances(updated);
+        setInstId(updated[updated.length - 1]?.id ?? "");
+      }, true);
+      setImportArchivePath(null);
+    } catch (error) {
+      setInstanceActionError(String(error));
+    } finally {
+      setInstanceImportBusy(false);
+    }
+  };
+  const chooseInstanceImport = async () => {
+    setInstanceActionError("");
+    try {
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "Arca instance or Modrinth pack", extensions: ["zip", "mrpack"] }],
+      });
+      if (typeof path !== "string") return;
+      if (path.toLowerCase().endsWith(".mrpack")) {
+        setInstanceImportBusy(true);
+        await startTask("Importing Modrinth pack", "", async (taskId) => {
+          const updated = await invoke<Instance[]>("modpack_install", {
+            req: {
+              source: "modrinth",
+              id: "",
+              name: "",
+              icon: "",
+              description: "",
+              java: java || "java",
+              java_mode: st.javaRuntime,
+              task_id: taskId,
+              archive_path: path,
+            },
+          });
+          setInstances(updated);
+          setInstId(updated[updated.length - 1]?.id ?? "");
+        }, true);
+        return;
+      }
+      const info = await invoke<InstanceArchiveInfo>("inspect_instance_archive", { path });
+      if (!info.has_metadata) {
+        setImportArchivePath(path);
+        setImportName(info.name);
+        setImportLoader("vanilla");
+        setImportMc("");
+        return;
+      }
+      await importZipArchive(path);
+    } catch (error) {
+      setInstanceActionError(String(error));
+    } finally {
+      setInstanceImportBusy(false);
+    }
+  };
+  const exportInstanceArchive = async (instance: Pick<Instance, "id" | "name" | "icon">) => {
+    const path = await save({
+      defaultPath: `${instance.name}.zip`,
+      filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+    });
+    if (path) {
+      await startTask(`Exporting ${instance.name}`, instance.icon, (taskId) =>
+        invoke("export_instance", { id: instance.id, path, taskId }));
+    }
   };
 
   // custom logo/background: pick a file. Logos are cropped square to 96x96 PNG.
   // Backgrounds: static images (png/jpg) are shrunk to fit 960px wide JPEG; an animated
   // gif is kept as-is (unprocessed), since resizing through canvas would flatten it to
   // a single frame and lose the animation.
-  const fileFor = useRef<"logo-new" | "logo-edit" | "bg-new" | "bg-edit">("logo-new");
-  const pickFile = (target: "logo-new" | "logo-edit" | "bg-new" | "bg-edit") => {
+  const fileFor = useRef<"logo-new" | "logo-edit" | "bg-new" | "bg-edit" | "account-icon" | "account-background">("logo-new");
+  const pickFile = (target: "logo-new" | "logo-edit" | "bg-new" | "bg-edit" | "account-icon" | "account-background") => {
     fileFor.current = target;
+    if (target === "account-icon" || target === "account-background") setAddErr("");
     if (fileRef.current) {
-      fileRef.current.accept = target === "bg-new" || target === "bg-edit"
+      fileRef.current.accept = target === "bg-new" || target === "bg-edit" || target === "account-background"
         ? "image/png,image/jpeg,image/gif"
         : "image/*";
     }
@@ -1255,13 +1522,19 @@ function AppInner() {
     e.target.value = "";
     if (!f) return;
     const target = fileFor.current;
-    const isBg = target === "bg-new" || target === "bg-edit";
+    const isBg = target === "bg-new" || target === "bg-edit" || target === "account-background";
+    const reportFileError = (message: string) => {
+      if (target === "account-icon" || target === "account-background") setAddErr(message);
+      else add(message);
+    };
 
     const apply = (url: string) => {
       if (target === "logo-new") setWIcon(url);
       else if (target === "logo-edit") setEditIcon(url);
       else if (target === "bg-new") setWBg(url);
-      else setEditBg(url);
+      else if (target === "bg-edit") setEditBg(url);
+      else if (target === "account-icon") setAddAccountIcon(url);
+      else setAddAccountBackground(url);
     };
 
     // Keep GIF bytes untouched so their animation is preserved even when the picker omits MIME type.
@@ -1269,21 +1542,21 @@ function AppInner() {
       const rd = new FileReader();
       rd.onload = () => {
         if (typeof rd.result !== "string" || !rd.result.startsWith("data:")) {
-          add(`Could not read ${f.name} as a GIF image.`);
+          reportFileError(`Could not read ${f.name} as a GIF image.`);
           return;
         }
         const encoded = rd.result.split(",", 2)[1];
         if (!encoded) {
-          add(`Could not read ${f.name} as a GIF image.`);
+          reportFileError(`Could not read ${f.name} as a GIF image.`);
           return;
         }
         const dataUrl = `data:image/gif;base64,${encoded}`;
         const img = new Image();
         img.onload = () => apply(dataUrl);
-        img.onerror = () => add(`Could not decode ${f.name} as a GIF image.`);
+        img.onerror = () => reportFileError(`Could not decode ${f.name} as a GIF image.`);
         img.src = dataUrl;
       };
-      rd.onerror = () => add(`Could not read ${f.name}: ${rd.error?.message ?? "file read failed"}`);
+      rd.onerror = () => reportFileError(`Could not read ${f.name}: ${rd.error?.message ?? "file read failed"}`);
       rd.readAsDataURL(f);
       return;
     }
@@ -1292,7 +1565,7 @@ function AppInner() {
     const rd = new FileReader();
     rd.onload = () => {
       if (typeof rd.result !== "string") {
-        add(`Could not read ${f.name} as an image.`);
+        reportFileError(`Could not read ${f.name} as an image.`);
         return;
       }
       const img = new Image();
@@ -1304,7 +1577,7 @@ function AppInner() {
           cv.width = W; cv.height = H;
           const ctx = cv.getContext("2d");
           if (!ctx) {
-            add(`Could not process ${f.name}: image canvas is unavailable.`);
+            reportFileError(`Could not process ${f.name}: image canvas is unavailable.`);
             return;
           }
           ctx.drawImage(img, 0, 0, W, H);
@@ -1315,7 +1588,7 @@ function AppInner() {
           const m = Math.min(img.width, img.height);
           const ctx = cv.getContext("2d");
           if (!ctx) {
-            add(`Could not process ${f.name}: image canvas is unavailable.`);
+            reportFileError(`Could not process ${f.name}: image canvas is unavailable.`);
             return;
           }
           ctx.drawImage(img, (img.width - m) / 2, (img.height - m) / 2, m, m, 0, 0, S, S);
@@ -1323,10 +1596,10 @@ function AppInner() {
         }
         apply(url);
       };
-      img.onerror = () => add(`Could not decode ${f.name} as an image.`);
+      img.onerror = () => reportFileError(`Could not decode ${f.name} as an image.`);
       img.src = rd.result;
     };
-    rd.onerror = () => add(`Could not read ${f.name}: ${rd.error?.message ?? "file read failed"}`);
+    rd.onerror = () => reportFileError(`Could not read ${f.name}: ${rd.error?.message ?? "file read failed"}`);
     rd.readAsDataURL(f);
   };
 
@@ -1355,7 +1628,7 @@ function AppInner() {
 
   return (
     <div className="shell" style={{ "--shell-height": `${winH / (st.uiScale / 100)}px` } as CSSVars}>
-      {firstRunOpen && (
+      {firstRunOpen && createPortal(
         <div className="onboarding-overlay">
           <section className="onboarding-card" aria-labelledby="onboarding-title">
             <header className="onboarding-brand">
@@ -1388,7 +1661,6 @@ function AppInner() {
                 <div className="onboarding-account-types">
                   {(["offline", "microsoft", "elyby"] as const).map((kind) => (
                     <button key={kind} className={"onboarding-account-type" + (addKind === kind ? " active" : "")} onClick={() => { setAddKind(kind); setAddErr(""); setFirstRunError(""); }}>
-                      <span>{kind === "offline" ? "◉" : kind === "microsoft" ? "▦" : "✦"}</span>
                       <b>{KIND_LABEL[kind]}</b>
                       <small>{kind === "offline" ? "No online sign-in" : kind === "microsoft" ? "Official Microsoft login" : "Ely.by account"}</small>
                     </button>
@@ -1477,7 +1749,8 @@ function AppInner() {
               </div>
             )}
           </section>
-        </div>
+        </div>,
+        getPortalRoot(),
       )}
       <input ref={fileRef} className="file-input-hidden" type="file" accept="image/*" onChange={onFile} />
       <header className="topbar">
@@ -1558,9 +1831,14 @@ function AppInner() {
                 </section>
 
                 <div className="rightcol">
-                <aside className="player">
+                <aside
+                  className={"player" + (current?.custom_background ? " has-profile-background" : "")}
+                  style={current?.custom_background ? {
+                    backgroundImage: `linear-gradient(180deg, rgba(10,9,16,.48), rgba(10,9,16,.78) 58%, rgba(10,9,16,.94)), url("${current.custom_background}")`,
+                  } : undefined}
+                >
                   {current && skins[current.id]?.data ? (
-                    <SkinModel data={skins[current.id]!.data!} slim={skins[current.id]!.slim} />
+                    <SkinModel data={skins[current.id]!.data!} slim={skins[current.id]!.slim} className="home-player-model" />
                   ) : current?.kind === "offline" && !skinFail ? (
                     <img className="skin" src={skin} alt="" onError={() => setSkinFail(true)} />
                   ) : <div className="skin ph" />}
@@ -1626,76 +1904,235 @@ function AppInner() {
           {page === "account" && (
             <section className="panel account-page">
               <header className="page-heading">
-                <div><span className="eyebrow">PLAYER PROFILE</span><h2>Accounts</h2>
-                  <p>Choose who you want to play as and manage your sign-in methods.</p></div>
-                <span className="count-chip">{accounts.length} {accounts.length === 1 ? "account" : "accounts"}</span>
+                <div><span className="eyebrow">PLAYER PROFILES</span><h2>Accounts</h2>
+                  <p>Manage your profiles and choose who joins your next adventure.</p></div>
+                <div className="account-heading-actions">
+                  <span className="count-chip">{accounts.length} {accounts.length === 1 ? "account" : "accounts"}</span>
+                  <button className="library-icon-action library-icon-action-expand account-add-trigger" onClick={openAddAccount} aria-label="Add account">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+                    <span>Add account</span>
+                  </button>
+                </div>
               </header>
 
               <div className="account-layout">
-                <section className="account-section">
-                  <div className="section-heading">
-                    <div><h3>Your accounts</h3><p>The selected account will be used when you launch Minecraft.</p></div>
+                <section className="account-section account-list-section">
+                  <div className="section-heading account-list-heading">
+                    <div><h3>Your profiles</h3><p>Select a profile to see its details.</p></div>
                   </div>
                   <div className="alist">
                     {accounts.length === 0 && (
                       <div className="account-empty"><span className="empty-avatar"><Icon n="user" /></span>
-                        <b>No accounts yet</b><p>Add an account to get started.</p></div>
+                        <b>No accounts yet</b><p>Add a profile to get started.</p>
+                        <button className="mini account-empty-add" onClick={openAddAccount}>Add your first account</button>
+                      </div>
                     )}
                     {accounts.map((a, index) => (
-                      <div key={a.id} className={("acc" + (a.id === selected ? " on" : "") + " animate-stagger")} style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}>
-                        <Avatar acc={a} skin={skins[a.id] ?? null} />
-                        <div className="ainfo"><b>{a.username}</b><span>{KIND_LABEL[a.kind]}</span></div>
+                      <button
+                        key={a.id}
+                        className={"account-entry" + (a.id === focusedAccount?.id ? " focused" : "") + " animate-stagger"}
+                        style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
+                        aria-pressed={a.id === focusedAccount?.id}
+                        onClick={() => setFocusedAccountId(a.id)}
+                      >
+                        <span className="account-entry-avatar"><Avatar acc={a} skin={skins[a.id] ?? null} /></span>
+                        <span className="account-entry-info">
+                          <b>{a.username}</b>
+                          <small>{KIND_LABEL[a.kind] ?? a.kind}</small>
+                        </span>
                         {a.id === selected
-                          ? <span className="badge">Selected</span>
-                          : <button className="mini" onClick={() => select(a.id)}>Select</button>}
-                        <button className="mini danger" onClick={() => remove(a.id)}>Remove</button>
-                      </div>
+                          ? <span className="account-active-indicator"><i />Active</span>
+                          : <span className="account-entry-chevron" aria-hidden="true">›</span>}
+                      </button>
                     ))}
                   </div>
                 </section>
 
-                <section className="account-section add-account">
-                  <div className="section-heading">
-                    <div><h3>Add an account</h3><p>Connect a new profile to your launcher.</p></div>
-                  </div>
-                  <div className="seg">
-                    {KINDS.map(([k, l]) => (
-                      <button key={k} className={addKind === k ? "on" : ""} onClick={() => { setAddKind(k); setAddErr(""); }}>{l}</button>
-                    ))}
-                  </div>
-
-                  {addKind === "offline" && (<>
-                    <label>Username <span className="field-note">Added instantly</span></label>
-                    <input value={addUser} onChange={(e) => setAddUser(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAccount()} />
-                  </>)}
-                  {addKind === "elyby" && (<>
-                    <label>Ely.by username / email</label>
-                    <input value={addUser} onChange={(e) => setAddUser(e.target.value)} />
-                    <label>Password <span className="field-note">For 2FA, use password:2FACODE</span></label>
-                    <input type="password" value={addPass} onChange={(e) => setAddPass(e.target.value)} />
-                  </>)}
-                  {addKind === "microsoft" && (
+                <section className="account-section account-detail-section" aria-live="polite">
+                  {focusedAccount ? (
                     <>
-                    <p className="hint account-notice">
-                      A browser window opens with a code to enter.
-                    </p>
+                      <div className="account-profile-banner">
+                        {focusedAccount.custom_background && (
+                          <span
+                            className="account-custom-banner-background"
+                            style={{ backgroundImage: `linear-gradient(90deg, rgba(23,20,32,.38), rgba(23,20,32,.08)), url("${focusedAccount.custom_background}")` }}
+                          />
+                        )}
+                        <div className="account-banner-figure" aria-hidden="true">
+                          {focusedSkin?.data && (
+                            <SkinModel
+                              data={focusedSkin.data}
+                              slim={focusedSkin.slim}
+                              s={4.5}
+                              className="account-banner-model"
+                              initialRotation={{ x: -24, y: -32 }}
+                            />
+                          )}
+                        </div>
+                        <span className="account-profile-avatar"><Avatar acc={focusedAccount} skin={skins[focusedAccount.id] ?? null} /></span>
+                        <button
+                          className="account-banner-edit"
+                          type="button"
+                          aria-label={`Edit ${focusedAccount.username} profile appearance`}
+                          title="Edit profile appearance"
+                          onClick={() => openEditAccount(focusedAccount)}
+                        >
+                          <img src={INSTANCE_EDIT_ICON} alt="" />
+                        </button>
+                        {focusedAccount.id === selected && <span className="account-profile-active"><i /> Active account</span>}
+                      </div>
+                      <div className="account-profile-heading">
+                        <div>
+                          <span className="eyebrow">MINECRAFT PROFILE</span>
+                          <h3 title={focusedAccount.username}>{focusedAccount.username}</h3>
+                          <p>{KIND_LABEL[focusedAccount.kind] ?? focusedAccount.kind} account</p>
+                        </div>
+                      </div>
+                      <div className="account-detail-list">
+                        <div className="account-detail-row">
+                          <span>Account type</span><b>{KIND_LABEL[focusedAccount.kind] ?? focusedAccount.kind}</b>
+                        </div>
+                        <div className="account-detail-row account-uuid-row">
+                          <span>Player UUID</span><b title={focusedAccount.uuid}>{focusedAccount.uuid || "Not available"}</b>
+                        </div>
+                      </div>
+                      <div className="account-profile-actions">
+                        {focusedAccount.id !== selected && (
+                          <button
+                            className="library-icon-action library-icon-action-expand account-set-active"
+                            aria-label="Set as active"
+                            onClick={() => {
+                              setFocusedAccountId(focusedAccount.id);
+                              select(focusedAccount.id).catch((error) => add(`Could not switch account: ${error}`));
+                            }}
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8.2 3.2 3.1L13 4.7" /></svg>
+                          <span>Set as active</span>
+                          </button>
+                        )}
+                        <button className="library-icon-action library-icon-action-expand account-remove" aria-label="Remove account" onClick={() => remove(focusedAccount.id).catch((error) => add(`Could not remove account: ${error}`))}>
+                          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4m2.5 0-.7 9.5H4.2L3.5 4m2.7 2v5m3.6-5v5" /></svg>
+                          <span>Remove account</span>
+                        </button>
+                      </div>
                     </>
+                  ) : (
+                    <div className="account-detail-empty">
+                      <span className="empty-avatar"><Icon n="user" /></span>
+                      <h3>Your next adventure starts here</h3>
+                      <p>Add a Minecraft profile to see its details and set it as active.</p>
+                      <button className="btn purple" onClick={openAddAccount}>Add an account</button>
+                    </div>
                   )}
-
-                  {msCode && addBusy && <div className="code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
-                  {addErr && <div className="err">{addErr}</div>}
-                  <button className="btn purple addbtn" disabled={addBusy} onClick={addAccount}>
-                    {addBusy ? "Waiting..." : addKind === "offline" ? "Add account" : addKind === "elyby" ? "Sign in & add" : "Sign in with Microsoft"}
-                  </button>
                 </section>
               </div>
+
+              {addAccountOpen && createPortal(
+                <div className="editbackdrop account-modal-backdrop" onClick={(event) => {
+                  if (event.target === event.currentTarget && !addBusy) setAddAccountOpen(false);
+                }}>
+                  <section className={`editdialog account-add-dialog ${editingAccountId ? "account-edit-dialog" : "account-create-dialog"} pop`} role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+                    <header className="editdialoghead">
+                      <div className="editdialogtitle">
+                        <h2 id="account-modal-title">{editingAccountId ? "Edit profile appearance" : "Create account"}</h2>
+                        <p>{editingAccountId ? "Customize the icon and banner shown for this profile." : "Choose how you want to sign in to Arca Launcher."}</p>
+                      </div>
+                      <button className="mini editclose" aria-label="Close dialog" disabled={addBusy} onClick={() => setAddAccountOpen(false)}>×</button>
+                    </header>
+                    <form className={`editdialogbody account-add-form${editingAccountId ? " account-edit-form" : " account-create-form"}`} onSubmit={(event) => {
+                      event.preventDefault();
+                      void addAccount().then((success) => { if (success) setAddAccountOpen(false); });
+                    }}>
+                      {!editingAccountId && <div className="account-kind-grid" role="group" aria-label="Account type">
+                        {KINDS.map(([kind, label]) => (
+                          <button
+                            key={kind}
+                            type="button"
+                            className={"account-kind-option" + (addKind === kind ? " active" : "")}
+                            disabled={addBusy}
+                            onClick={() => { setAddKind(kind); setAddErr(""); }}
+                          >
+                            <b>{label}</b>
+                            <small>{kind === "offline" ? "Quick local profile" : kind === "elyby" ? "Sign in with Ely.by" : "Official Microsoft login"}</small>
+                          </button>
+                        ))}
+                      </div>}
+                      {editingAccountId && (
+                        <>
+                          <div className="editfield">
+                            <label>Profile icon <span className="editoptional">Optional</span></label>
+                            <div className="editassetrow">
+                              <div className="editiconpreview account-icon-preview">
+                                {addAccountIcon
+                                  ? <img src={addAccountIcon} alt="Custom profile icon preview" />
+                                  : <span className="empty-avatar"><Icon n="user" /></span>}
+                              </div>
+                              <div className="editassetactions">
+                                <button className="mini" type="button" disabled={addBusy} onClick={() => pickFile("account-icon")}>Choose image...</button>
+                                {addAccountIcon && <button className="mini" type="button" disabled={addBusy} onClick={() => setAddAccountIcon("")}>Use default</button>}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="editfield">
+                            <label>Profile banner <span className="editoptional">Optional · Image or GIF</span></label>
+                            <div className="editassetrow editbackgroundrow account-banner-assetrow">
+                              {addAccountBackground
+                                ? <div className="bgpreview editbgpreview account-banner-preview"><img src={addAccountBackground} alt="Custom banner preview" /></div>
+                                : <div className="bgpreview ph editbgpreview account-banner-preview"><span>No custom banner</span></div>}
+                              <div className="editassetactions">
+                                <button className="mini" type="button" disabled={addBusy} onClick={() => pickFile("account-background")}>Choose banner...</button>
+                                {addAccountBackground && <button className="mini" type="button" disabled={addBusy} onClick={() => setAddAccountBackground("")}>Remove</button>}
+                              </div>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                      {!editingAccountId && addKind === "offline" && (
+                        <div className="editfield">
+                          <label htmlFor="account-username">Username <span className="field-note">Added instantly</span></label>
+                          <input id="account-username" autoFocus className="editinput" value={addUser} onChange={(event) => setAddUser(event.target.value)} required maxLength={16} placeholder="Choose a player name" />
+                        </div>
+                      )}
+                      {!editingAccountId && addKind === "elyby" && (
+                        <>
+                          <div className="editfield">
+                            <label htmlFor="account-elyby-username">Ely.by username or email</label>
+                            <input id="account-elyby-username" autoFocus className="editinput" value={addUser} onChange={(event) => setAddUser(event.target.value)} required placeholder="Username or email" />
+                          </div>
+                          <div className="editfield">
+                            <label htmlFor="account-elyby-password">Password <span className="field-note">For 2FA, use password:2FACODE</span></label>
+                            <input id="account-elyby-password" className="editinput" type="password" value={addPass} onChange={(event) => setAddPass(event.target.value)} required placeholder="Enter your password" />
+                          </div>
+                        </>
+                      )}
+                      {!editingAccountId && addKind === "microsoft" && (
+                        <p className="hint account-notice">A secure browser window will open with a code to enter and complete sign-in.</p>
+                      )}
+                      {msCode && addBusy && <div className="code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
+                      {addErr && <div className="err" role="alert">{addErr}</div>}
+                      <footer className="btnrow editdialogfooter account-modal-footer">
+                        <button className="mini" type="button" disabled={addBusy} onClick={() => setAddAccountOpen(false)}>Cancel</button>
+                        <button className="btn purple addbtn" type="submit" disabled={addBusy}>
+                          {addBusy ? "Waiting..." : editingAccountId ? "Save changes" : addKind === "offline" ? "Add account" : addKind === "elyby" ? "Sign in & add" : "Sign in with Microsoft"}
+                        </button>
+                      </footer>
+                    </form>
+                  </section>
+                </div>,
+                getPortalRoot(),
+              )}
             </section>
           )}
 
           {page === "versions" && (
             contentInst ? (
               <div key={contentInst.id} className="content-detail-enter">
-                <ContentPage inst={contentInst} onBack={() => setContentInst(null)} />
+                <ContentPage
+                  inst={contentInst}
+                  onBack={() => setContentInst(null)}
+                  onEdit={() => void startEdit(contentInst)}
+                  onExport={exportInstanceArchive}
+                />
               </div>
             ) : (
             <section className="panel">
@@ -1732,7 +2169,7 @@ function AppInner() {
                     ))}
                   </nav>
 
-                <div key={step} className="stepbox new-instance-step">
+                <div key={step} className={"stepbox new-instance-step" + (step === 2 ? " new-instance-loader-step" : "")}>
                 {step === 1 && (<>
                   <div className="new-step-heading">
                     <div><h3>Choose your Minecraft version</h3><p>Pick the release you want this instance to run.</p></div>
@@ -1857,7 +2294,38 @@ function AppInner() {
                       {instanceSearch && <button className="instance-search-clear" aria-label="Clear search" onClick={() => setInstanceSearch("")}>×</button>}
                     </label>
                     <span className="instance-count">{filteredInstances.length} of {instances.length} instances</span>
+                    <div className="instance-toolbar-actions">
+                      <button
+                        className={"library-icon-action library-icon-action-expand instance-toolbar-icon instance-toolbar-refresh instance-refresh" + (instancesRefreshing ? " refreshing" : "")}
+                        onClick={() => void refreshInstances()}
+                        disabled={instancesRefreshing}
+                        aria-label="Refresh instances"
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true">
+                          <path d="M13.2 6A5.5 5.5 0 0 0 3 4.4L1.8 5.7M1.8 2.8v2.9h2.9M2.8 10a5.5 5.5 0 0 0 10.2 1.6l1.2-1.3m0 2.9v-2.9h-2.9" />
+                        </svg>
+                        <span>Refresh</span>
+                      </button>
+                      <button className="library-icon-action library-icon-action-expand instance-toolbar-icon instance-toolbar-import" onClick={() => void chooseInstanceImport()} disabled={instanceImportBusy}>
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 10V2.5m0 0L5 5.5m3-3 3 3M2.5 9v4.5h11V9" /></svg>
+                        <span>{instanceImportBusy ? "Importing..." : "Import"}</span>
+                      </button>
+                      {instanceSelectionMode ? <>
+                        <button className="library-icon-action instance-selection-cancel-action" onClick={cancelInstanceSelection}>Cancel selection</button>
+                        <button
+                          className="library-icon-action instance-delete-selected-action"
+                          onClick={() => setDeleteInstancesConfirm("warning")}
+                          disabled={!selectedInstanceIds.length || busy || gameRunning || anyRunning}
+                        >Delete selected ({selectedInstanceIds.length})</button>
+                      </> : (
+                        <button className="library-icon-action library-icon-action-expand instance-toolbar-icon instance-toolbar-delete" onClick={() => { setInstanceSelectionMode(true); setInstanceActionError(""); }}>
+                          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4m2.5 0-.7 9.5H4.2L3.5 4m2.7 2v5m3.6-5v5" /></svg>
+                          <span>Select to delete</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
+                  {instanceActionError && <div className="err" role="alert">{instanceActionError}</div>}
                   <div className="ilist">
                     {instances.length === 0 ? (
                       <div className="instances-empty"><span className="empty-cube"><Icon n="cube" /></span>
@@ -1871,8 +2339,7 @@ function AppInner() {
                       <InstanceRowBackground
                         key={i.id}
                         instance={i}
-                        className={(i.id === instId ? "on " : "") + "animate-stagger"}
-                        style={{ animationDelay: `${Math.min(index, 20) * 0.02}s` }}
+                        className={(i.id === instId ? "on " : "") + (selectedInstanceIds.includes(i.id) ? "is-delete-selected " : "") + (instancesRefreshing ? "is-refreshing" : "")}
                         onBackgroundError={(message) => add(message)}
                       >
                         <button
@@ -1898,20 +2365,26 @@ function AppInner() {
                             : <button className="mini select-instance" onClick={() => setInstId(i.id)}>Set active</button>}
                         </span>
                         <div className="instance-row-actions">
-                          {delId === i.id ? (<>
-                            <span className="instance-delete-label">Remove?</span>
-                            <button className="mini danger" onClick={() => removeInst(i.id, false)}>Remove</button>
-                            <button className="mini danger" onClick={() => removeInst(i.id, true)}>Remove files</button>
-                            <button className="mini" onClick={() => setDelId(null)}>Cancel</button>
-                          </>) : (<>
-                            <button className="mini" onClick={() => {
+                          {instanceSelectionMode ? (
+                            <button
+                              type="button"
+                              className={"instance-select-button" + (selectedInstanceIds.includes(i.id) ? " selected" : "")}
+                              aria-pressed={selectedInstanceIds.includes(i.id)}
+                              aria-label={`${selectedInstanceIds.includes(i.id) ? "Deselect" : "Select"} ${i.name} for deletion`}
+                              onClick={() => toggleInstanceSelection(i.id)}
+                              disabled={busy || gameRunning || anyRunning}
+                            >
+                              <span className="instance-select-indicator" aria-hidden="true">{selectedInstanceIds.includes(i.id) ? "✓" : ""}</span>
+                            </button>
+                          ) : <>
+                            <button className="library-icon-action instance-content-action" aria-label={`Open content for ${i.name}`} title="Open instance content" onClick={() => {
                               setTab("instances");
                               setPage("versions");
                               setContentInst(i);
-                            }}>Content</button>
-                            <button className="mini" onClick={() => void startEdit(i)}>Edit</button>
-                            <button className="mini danger" onClick={() => setDelId(i.id)}>Delete</button>
-                          </>)}
+                            }}>
+                              <img src={INSTANCE_EDIT_ICON} alt="" />
+                            </button>
+                          </>}
                         </div>
                       </InstanceRowBackground>
                     ))}
@@ -2068,7 +2541,7 @@ function AppInner() {
                         <option value="close">Close the launcher</option>
                       </select>
                       <label>Interface size <span className="field-value">{st.uiScale}%</span></label>
-                      <input type="range" min={80} max={200} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
+                      <input type="range" min={80} max={130} step={5} value={st.uiScale} onChange={(e) => set("uiScale", +e.target.value)} />
                       <label className="check">
                         <input type="checkbox" checked={st.reduceAnimations} onChange={(e) => set("reduceAnimations", e.target.checked)} />
                         Reduce animations
@@ -2204,6 +2677,7 @@ function AppInner() {
         <Modal
           title={MAINTENANCE_DETAILS[maintenanceAction].title}
           compact
+          hideClose
           onClose={() => { if (!maintenanceBusy) setMaintenanceAction(null); }}
         >
           <div className="maintenance-confirm">
@@ -2280,7 +2754,92 @@ function AppInner() {
         </Modal>
       )}
 
-      {editId && (
+      {deleteInstancesConfirm && (
+        <Modal
+          title={deleteInstancesConfirm === "warning" ? "Review instance deletion" : "Confirm permanent deletion"}
+          compact
+          hideClose
+          overlayClassName="delete-confirm-overlay"
+          onClose={() => { if (!deleteInstancesBusy) setDeleteInstancesConfirm(null); }}
+        >
+          <div className="delete-instances-confirm">
+            {deleteInstancesConfirm === "warning" ? (
+              <>
+                <p className="delete-instances-warning">
+                  You selected <b>{selectedInstanceIds.length}</b> instance{selectedInstanceIds.length === 1 ? "" : "s"}.
+                  Deleting them will permanently remove their folders, including worlds, mods, resource packs, and settings.
+                </p>
+                <p>This cannot be undone. Continue to the final confirmation?</p>
+                {instanceActionError && <p className="setting-error" role="alert">{instanceActionError}</p>}
+                <footer className="btnrow editdialogfooter delete-confirm-actions">
+                  <button className="mini" onClick={() => setDeleteInstancesConfirm(null)}>Cancel</button>
+                  <button
+                    className="mini danger"
+                    disabled={deleteInstancesBusy || !selectedInstanceIds.length}
+                    onClick={() => { setInstanceActionError(""); setDeleteInstancesConfirm("confirm"); }}
+                  >Continue</button>
+                </footer>
+              </>
+            ) : (
+              <>
+                <p className="delete-instances-warning">
+                  Final check: permanently delete <b>{selectedInstanceIds.length}</b> selected instance{selectedInstanceIds.length === 1 ? "" : "s"} and all their files?
+                </p>
+                <div className="delete-instances-list">
+                  {instances.filter((instance) => selectedInstanceIds.includes(instance.id)).map((instance) => (
+                    <span key={instance.id}>{instance.name}</span>
+                  ))}
+                </div>
+                {instanceActionError && <p className="setting-error" role="alert">{instanceActionError}</p>}
+                <footer className="btnrow editdialogfooter delete-confirm-actions">
+                  <button className="mini" onClick={() => setDeleteInstancesConfirm("warning")} disabled={deleteInstancesBusy}>Go back</button>
+                  <button className="mini danger" onClick={() => void removeSelectedInstances()} disabled={deleteInstancesBusy}>
+                    {deleteInstancesBusy ? "Deleting..." : "Permanently delete"}
+                  </button>
+                </footer>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {importArchivePath && (
+        <Modal
+          title="Import archive without instance metadata"
+          compact
+          onClose={() => { if (!instanceImportBusy) setImportArchivePath(null); }}
+        >
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            void importZipArchive(importArchivePath, { name: importName, loader: importLoader, mc: importMc });
+          }}>
+            <p className="setting-error" role="alert">
+              This ZIP does not contain <code>instances.json</code>. Set up the instance details to import its files.
+            </p>
+            <label>Instance name</label>
+            <input value={importName} onChange={(event) => setImportName(event.target.value)} maxLength={120} required />
+            <label>Minecraft version</label>
+            <input value={importMc} onChange={(event) => setImportMc(event.target.value)} placeholder="e.g. 1.21.1" maxLength={64} required />
+            <label>Mod loader</label>
+            <select value={importLoader} onChange={(event) => setImportLoader(event.target.value)}>
+              <option value="vanilla">Vanilla</option>
+              <option value="fabric">Fabric</option>
+              <option value="forge">Forge</option>
+              <option value="neoforge">NeoForge</option>
+              <option value="quilt">Quilt</option>
+            </select>
+            {instanceActionError && <p className="setting-error" role="alert">{instanceActionError}</p>}
+            <footer className="btnrow editdialogfooter">
+              <button className="mini" type="button" onClick={() => setImportArchivePath(null)} disabled={instanceImportBusy}>Cancel</button>
+              <button className="btn purple addbtn" type="submit" disabled={instanceImportBusy || !importName.trim() || !importMc.trim()}>
+                {instanceImportBusy ? "Importing..." : "Import instance"}
+              </button>
+            </footer>
+          </form>
+        </Modal>
+      )}
+
+      {editId && createPortal(
         <div className="editbackdrop" onClick={() => setEditId(null)}>
           <section
             className="editdialog pop"
@@ -2294,7 +2853,6 @@ function AppInner() {
                 <h2 id="edit-instance-title">Edit instance</h2>
                 <p>Customize how this instance looks in your launcher.</p>
               </div>
-              <button className="mini editclose" type="button" aria-label="Close edit instance dialog" onClick={() => setEditId(null)}>✕</button>
             </header>
             <form
               className="editdialogbody"
@@ -2361,7 +2919,8 @@ function AppInner() {
               </footer>
             </form>
           </section>
-        </div>
+        </div>,
+        getPortalRoot(),
       )}
 
       <DownloadsFloat />

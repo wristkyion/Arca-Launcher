@@ -146,6 +146,8 @@ export default function ModsPage({
   const [gameVersionsError, setGameVersionsError] = useState("");
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadingOverlayVisible, setLoadingOverlayVisible] = useState(false);
+  const [loadingOverlayExiting, setLoadingOverlayExiting] = useState(false);
   const [err, setErr] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [detailsProject, setDetailsProject] = useState<Hit | null>(null);
@@ -191,6 +193,7 @@ export default function ModsPage({
 
   const search = async (offset: number) => {
     const id = ++reqId.current;
+    const startedAt = performance.now();
     setLoading(true);
     setErr("");
     setHits([]);
@@ -215,9 +218,28 @@ export default function ModsPage({
     } catch (e) {
       if (id === reqId.current) setErr(String(e));
     } finally {
-      if (id === reqId.current) setLoading(false);
+      if (id === reqId.current) {
+        const remaining = 900 - (performance.now() - startedAt);
+        if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+        if (id === reqId.current) setLoading(false);
+      }
     }
   };
+
+  useEffect(() => {
+    if (loading) {
+      setLoadingOverlayVisible(true);
+      setLoadingOverlayExiting(false);
+      return;
+    }
+    if (!loadingOverlayVisible) return;
+    setLoadingOverlayExiting(true);
+    const timer = window.setTimeout(() => {
+      setLoadingOverlayVisible(false);
+      setLoadingOverlayExiting(false);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [loading, loadingOverlayVisible]);
 
   useEffect(() => {
     setPage(1);
@@ -461,6 +483,12 @@ export default function ModsPage({
           <div className="err">Select an instance on the Home page before installing {kind === "mod" ? "mods" : kind === "resourcepack" ? "resource packs" : "shader packs"}.</div>
         )}
         {err && <div className="err">{err}</div>}
+      <div className="mods-results-area">
+      {loadingOverlayVisible && (
+        <div className={`library-loading-overlay mods-loading-overlay${loadingOverlayExiting ? " is-exiting" : ""}`} role="status" aria-label="Searching projects">
+          <span className="library-loading-spinner" aria-hidden="true" />
+        </div>
+      )}
       <div className={`mgrid ${viewMode === "list" ? "mods-list" : ""}`}>
         {hits.map((h, index) => {
           const key = keyOf(h);
@@ -561,6 +589,7 @@ export default function ModsPage({
         </nav>
       )}
       </div>
+      </div>
 
       {detailsProject && (() => {
         const portals = document.getElementById("portals");
@@ -575,7 +604,6 @@ export default function ModsPage({
                   {project.icon && <img className="micon" src={project.icon} width={52} height={52} alt="" />}
                   <div><span className="mods-eyebrow mods-source-eyebrow"><img src={SOURCE_ICONS[source]} alt="" />{cap(source)} PROJECT</span><h2>{project.title}</h2><p>by {project.author || detailsProject.author || "Unknown author"}</p></div>
                 </div>
-                <button className="mini" onClick={() => setDetailsProject(null)} aria-label="Close project details">✕</button>
               </header>
               {detailsLoading && <div className="hint">Loading full project details...</div>}
               {detailsError && <div className="err">{detailsError}</div>}
@@ -634,7 +662,6 @@ export default function ModsPage({
                 <img className="micon" src={picker.icon} width={40} height={40} alt=""
                   onError={(e) => e.currentTarget.classList.add("is-hidden")} />
                 <b>{picker.title}</b>
-                <button className="mini" onClick={closePicker}>✕</button>
               </div>
                 <div className="seg">
                   <button className={verMode === "latest" ? "on" : ""} onClick={() => setVerMode("latest")}>Latest compatible</button>

@@ -8,6 +8,10 @@ pub struct Stored {
     pub kind: String, // "offline" | "elyby" | "microsoft"
     pub username: String,
     pub uuid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_background: Option<String>,
     #[serde(default)]
     pub access_token: String, // Ely.by
     #[serde(default)]

@@ -40,14 +40,45 @@ This project is still in early development, so some features may be incomplete, 
 ## Features
 
 - Create separate Minecraft instances with custom names, icons, and backgrounds.
+- Select and permanently delete multiple instances, or export an instance as a ZIP to share and import elsewhere.
+- Import instance ZIP archives, configure metadata when `instances.json` is missing, and install Modrinth `.mrpack` files.
 - Install Minecraft releases, snapshots, and supported older versions.
 - Manage Offline, Ely.by, and Microsoft accounts.
+- Customize account profiles with optional icons and banner backgrounds shown on the Accounts and Play pages.
 - Browse and install mods, modpacks, resource packs, and shader packs from Modrinth and CurseForge.
 - View and manage installed content for each instance.
 - Choose system Java or a launcher-managed Java runtime, adjust memory, and configure launch options.
 - Customize the launcher with built-in or local CSS themes.
 
 ## Changelog
+
+### v0.2.1 — Huge Update
+
+#### Instance management
+
+- Added multi-select instance deletion with a two-step confirmation.
+- Added instance ZIP export and import, including a setup flow for archives without `instances.json`.
+- Added support for importing Modrinth `.mrpack` files.
+- Added task-panel progress and completion or error status for archive imports and exports.
+
+#### Library and downloader
+
+- Reworked Installed Content with category navigation, search, refreshed icons, and smoother category transitions.
+- Added loading overlays for Installed Content and downloader searches.
+- Improved instance search, refresh, and selection controls.
+
+#### Accounts and profiles
+
+- Redesigned the Accounts page with a profile list, detailed account view, and modal-based account management.
+- Added optional custom profile icons and banner backgrounds, with controls to edit profile appearance.
+- Added the active profile banner and an enlarged character preview to the Play page.
+
+#### Polish
+
+- Updated instance actions with compact icon buttons and consistent hover behavior.
+- Improved selection checkboxes and refreshed content controls.
+- Moved dialogs into portals, scaled them with the Interface Size setting, and added consistent entrance animations.
+- Streamlined confirmation dialogs and refined their sizing and controls.
 
 ### v0.2.0 — Power
 

@@ -6,6 +6,7 @@
     "core:default",
     "core:window:allow-start-dragging",
     "dialog:allow-open",
+    "dialog:allow-save",
     "process:allow-restart",
     "updater:default"
   ]

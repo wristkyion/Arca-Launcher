@@ -5,6 +5,7 @@ mod auth;
 mod content;
 mod game;
 mod instances;
+mod instance_archive;
 mod migration;
 mod mods;
 
@@ -1357,11 +1358,8 @@ fn delete_content(req: DeleteContentReq) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_instance_folder(req: ContentReq) -> Result<(), String> {
-    let folder = content::folder_path(&instance_dir(&req.instance)?, &req.kind)
-        .map_err(|e| format!("{e:#}"))?;
-    std::fs::create_dir_all(&folder)
-        .map_err(|e| format!("Could not create content folder: {e}"))?;
+fn open_instance_folder(instance: String) -> Result<(), String> {
+    let folder = instance_dir(&instance)?;
     #[cfg(windows)]
     std::process::Command::new("explorer")
         .arg(&folder)
@@ -1460,6 +1458,8 @@ struct AccountView {
     kind: String,
     username: String,
     uuid: String,
+    custom_icon: Option<String>,
+    custom_background: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1479,6 +1479,8 @@ fn view(s: &Store) -> AccountList {
                 kind: a.kind.clone(),
                 username: a.username.clone(),
                 uuid: a.uuid.clone(),
+                custom_icon: a.custom_icon.clone(),
+                custom_background: a.custom_background.clone(),
             })
             .collect(),
     }
@@ -1489,12 +1491,36 @@ struct AddReq {
     kind: String,
     username: String,
     password: String,
+    #[serde(default)]
+    custom_icon: Option<String>,
+    #[serde(default)]
+    custom_background: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateAccountProfileReq {
+    id: String,
+    custom_icon: Option<String>,
+    custom_background: Option<String>,
 }
 
 #[tauri::command]
 fn list_accounts() -> AccountList {
     let (_, _, cfg) = setup_dirs();
     view(&accounts::load(&cfg))
+}
+
+#[tauri::command]
+fn update_account_profile(req: UpdateAccountProfileReq) -> Result<AccountList, String> {
+    let (_, _, cfg) = setup_dirs();
+    let mut store = accounts::load(&cfg);
+    let Some(account) = store.accounts.iter_mut().find(|account| account.id == req.id) else {
+        return Err("Account not found".into());
+    };
+    account.custom_icon = req.custom_icon;
+    account.custom_background = req.custom_background;
+    accounts::save(&cfg, &store);
+    Ok(view(&store))
 }
 
 #[tauri::command]
@@ -1529,8 +1555,10 @@ async fn add_account(app: AppHandle, req: AddReq) -> Result<AccountList, String>
 async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
     let (_, launcher_dir, cfg) = setup_dirs();
     let mut store = accounts::load(&cfg);
+    let custom_icon = req.custom_icon;
+    let custom_background = req.custom_background;
 
-    let stored = match req.kind.as_str() {
+    let mut stored = match req.kind.as_str() {
         // instant
         "offline" => {
             let n = req.username.trim();
@@ -1588,6 +1616,8 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
         }
         k => anyhow::bail!("Unknown account type {k}"),
     };
+    stored.custom_icon = custom_icon.clone();
+    stored.custom_background = custom_background.clone();
 
     // same account added twice -> update it instead of duplicating
     let pos = store
@@ -1597,6 +1627,12 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
     let id = match pos {
         Some(i) => {
             let id = store.accounts[i].id.clone();
+            if stored.custom_icon.is_none() {
+                stored.custom_icon = store.accounts[i].custom_icon.clone();
+            }
+            if stored.custom_background.is_none() {
+                stored.custom_background = store.accounts[i].custom_background.clone();
+            }
             store.accounts[i] = Stored {
                 id: id.clone(),
                 ..stored
@@ -1631,6 +1667,20 @@ async fn get_skin(kind: String, username: String, uuid: String) -> Option<Skin> 
 
 async fn fetch_skin(kind: &str, username: &str, uuid: &str) -> anyhow::Result<Option<Skin>> {
     let c = game::http();
+    if kind == "offline" {
+        let url = format!("https://mc-heads.net/skin/{username}");
+        let png = c.get(&url).send().await?.error_for_status()?.bytes().await?;
+        let data = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        return Ok(Some(Skin {
+            url,
+            slim: false,
+            data,
+        }));
+    }
+
     let textures: serde_json::Value = match kind {
         "elyby" => {
             let r = c
@@ -1845,7 +1895,7 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
 
 // ------------------------------------------------------------ instances
 
-fn slug(name: &str) -> String {
+pub(crate) fn slug(name: &str) -> String {
     let mut s = String::new();
     for c in name.chars() {
         if c.is_ascii_alphanumeric() {
@@ -2090,8 +2140,13 @@ fn main() {
             cancel_download,
             edit_instance,
             remove_instance,
+            instance_archive::inspect_instance_archive,
+            instance_archive::import_instance_archive,
+            instance_archive::export_instance,
+            instance_archive::remove_instances,
             list_accounts,
             add_account,
+            update_account_profile,
             remove_account,
             select_account,
             get_skin,

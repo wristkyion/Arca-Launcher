@@ -1474,6 +1474,8 @@ pub struct PackReq {
     pub task_id: String,
     #[serde(default = "default_java_runtime")]
     pub java_mode: String,
+    #[serde(default)]
+    pub archive_path: Option<String>,
 }
 
 fn default_java_runtime() -> String {
@@ -1726,34 +1728,68 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
     let instance_root = crate::instance_root().map_err(|error| anyhow!("{error}"))?;
     fs::create_dir_all(&instance_root)?;
     let c = game::http();
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
+    if req.archive_path.is_none() && req.name.trim().is_empty() {
         return Err(anyhow!("The modpack has no name"));
     }
-
     emit(&app, "Creating instance...");
 
-    // 1. download the pack archive
-    let (url, fname) = match req.source.as_str() {
-        "modrinth" => mr_pack_file(&c, &req.id).await?,
-        "curseforge" => cf_pack_file(&c, &req.id).await?,
-        s => return Err(anyhow!("Unknown source {s}")),
+    // 1. Use a user-selected .mrpack or download the selected provider pack.
+    let archive = if let Some(path) = req.archive_path.as_deref() {
+        if req.source != "modrinth"
+            || Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case("mrpack"))
+        {
+            return Err(anyhow!("Only Modrinth .mrpack archives can be imported"));
+        }
+        let archive = PathBuf::from(path);
+        if !archive.is_file() {
+            return Err(anyhow!("The selected .mrpack file could not be found"));
+        }
+        archive
+    } else {
+        let (url, fname) = match req.source.as_str() {
+            "modrinth" => mr_pack_file(&c, &req.id).await?,
+            "curseforge" => cf_pack_file(&c, &req.id).await?,
+            s => return Err(anyhow!("Unknown source {s}")),
+        };
+        let cache = launcher.join("cache");
+        fs::create_dir_all(&cache)?;
+        let archive = cache.join(&fname);
+        let _ = fs::remove_file(&archive);
+        emit(&app, format!("Downloading {fname}"));
+        let (_cancel_tx, cancelled) = watch::channel(false);
+        let download_context = ModInstallContext {
+            task_id: req.task_id.clone(),
+            cancelled,
+            downloaded_files: Arc::new(Mutex::new(Vec::new())),
+        };
+        download_mod_file(&app, &c, &url, &archive, &download_context).await?;
+        archive
     };
-    let cache = launcher.join("cache");
-    fs::create_dir_all(&cache)?;
-    let archive = cache.join(&fname);
-    let _ = fs::remove_file(&archive);
-    emit(&app, format!("Downloading {fname}"));
-    let (_cancel_tx, cancelled) = watch::channel(false);
-    let download_context = ModInstallContext {
-        task_id: req.task_id.clone(),
-        cancelled,
-        downloaded_files: Arc::new(Mutex::new(Vec::new())),
-    };
-    download_mod_file(&app, &c, &url, &archive, &download_context).await?;
 
     // 2. read what the pack needs
     let plan = read_plan(&req.source, &archive)?;
+    let mut name = req.name.trim().to_string();
+    let mut description = req.description.clone();
+    if req.archive_path.is_some() {
+        let mut zip = zip::ZipArchive::new(fs::File::open(&archive)?)?;
+        let mut index = String::new();
+        zip.by_name("modrinth.index.json")
+            .map_err(|_| anyhow!("Not a valid .mrpack file (modrinth.index.json is missing)"))?
+            .read_to_string(&mut index)?;
+        let index: Value = serde_json::from_str(&index)?;
+        if name.is_empty() {
+            name = index["name"].as_str().unwrap_or("").trim().to_string();
+        }
+        if description.trim().is_empty() {
+            description = index["summary"].as_str().unwrap_or("").to_string();
+        }
+    }
+    if name.is_empty() {
+        return Err(anyhow!("The modpack has no name"));
+    }
     let java = crate::pick_java(&app, &req.java, &req.java_mode, &plan.mc).await?;
     emit(
         &app,
@@ -1860,7 +1896,7 @@ async fn pack(app: AppHandle, req: PackReq) -> Result<Vec<Instance>> {
             }
         }
     };
-    let description: String = req.description.chars().take(1200).collect();
+    let description: String = description.chars().take(1200).collect();
     let instance = Instance {
         id: id.clone(),
         name,

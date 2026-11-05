@@ -79,6 +79,7 @@ type Ctx = {
   refreshInstalled: (instanceId: string, kind?: "mod" | "resourcepack" | "shader") => Promise<void>;
   configureDownloads: (concurrency: number, autoClear: boolean) => void;
   startMigration: () => Promise<void>;
+  startTask: (title: string, icon: string, run: (taskId: string) => Promise<void>, cancellable?: boolean) => Promise<void>;
 };
 
 const DownloadsCtx = createContext<Ctx | null>(null);
@@ -342,6 +343,27 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const startTask = async (
+    title: string,
+    icon: string,
+    run: (taskId: string) => Promise<void>,
+    cancellable = false,
+  ) => {
+    const key = `task:${crypto.randomUUID()}`;
+    setTasks((ts) => [...ts, {
+      key, title, icon, kind: "instance", source: "launcher",
+      phase: "running", detail: "Starting...", pct: null,
+      ...(cancellable ? { cancel: () => cancelTask(key) } : {}),
+    }]);
+    try {
+      await run(key);
+      patch(key, { phase: "done", detail: "Completed", pct: 100 });
+    } catch (error) {
+      patch(key, { phase: "error", detail: String(error), pct: null });
+      throw error;
+    }
+  };
+
   pumpQueueRef.current = () => {
     while (runningCountRef.current < maxConcurrentRef.current && queueRef.current.length > 0) {
       const index = queueRef.current.findIndex((job) => !job.serialKey || !runningSerialKeysRef.current.has(job.serialKey));
@@ -364,7 +386,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const anyRunning = tasks.some((t) => t.phase === "running" || t.phase === "queued" || t.phase === "cancelling");
 
   return (
-    <DownloadsCtx.Provider value={{ tasks, done, anyRunning, install, installInstance, startMigration, cancel: cancelTask, dismiss, refreshInstalled, configureDownloads }}>
+    <DownloadsCtx.Provider value={{ tasks, done, anyRunning, install, installInstance, startMigration, startTask, cancel: cancelTask, dismiss, refreshInstalled, configureDownloads }}>
       {children}
     </DownloadsCtx.Provider>
   );
