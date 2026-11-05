@@ -21,7 +21,7 @@ if (!isSplashWindow) {
   const titlebarRoot = ReactDOM.createRoot(titlebarEl);
   titlebarRoot.render(
     <div className="titlebar" data-tauri-drag-region>
-      <div className="titlebar-title" data-tauri-drag-region>0.2.1huge</div>
+      <div className="titlebar-title" data-tauri-drag-region>0.2.2cross</div>
       <div className="window-controls">
         <button className="window-btn minimize" onClick={() => invoke("minimize_window")} title="Minimize">
           <svg width="12" height="1" viewBox="0 0 12 1"><path d="M0 0h12v1H0z" fill="currentColor"/></svg>

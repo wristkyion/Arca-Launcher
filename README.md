@@ -52,6 +52,13 @@ This project is still in early development, so some features may be incomplete, 
 
 ## Changelog
 
+### v0.2.2 — Cross
+
+- Added Linux AppImage, Debian, and RPM bundle configuration.
+- Added macOS `.app` and `.dmg` bundle configuration.
+- Extended GitHub Actions tag releases to build and upload Windows, Linux, and macOS packages.
+- Documented native build requirements and the Linux/macOS system Java requirement.
+
 ### v0.2.1 — Huge Update
 
 #### Instance management
@@ -83,9 +90,13 @@ This project is still in early development, so some features may be incomplete, 
 ## Install a release
 
 1. Open [Arca Launcher releases](https://github.com/wristkyion/Arca-Launcher/releases).
-2. Download the latest installer for your operating system. On Windows, use the `.exe` setup installer or `.msi` package.
-3. Run the installer and follow its prompts.
-4. Start Arca Launcher and follow the first-run setup. You can add an account or create an instance later if you prefer.
+2. Download the package for your operating system:
+   - **Windows:** `.exe` setup installer or `.msi` package.
+   - **macOS:** `.dmg` disk image. Open it and drag Arca Launcher to Applications. The app is not code-signed or notarized, so macOS may show a security warning.
+   - **Linux:** `.AppImage`, `.deb` (Debian/Ubuntu), or `.rpm` (Fedora/RHEL). Install the package for your distribution, or make the AppImage executable before opening it.
+3. Start Arca Launcher and follow the first-run setup. You can add an account or create an instance later if you prefer.
+
+On Linux and macOS, install Java separately and choose the system or custom Java runtime in launcher settings. Launcher-managed Java downloads are currently supported on Windows x64 only.
 
 ### Windows requirement
 
@@ -134,6 +145,23 @@ npm run tauri build
 ```
 
 On Windows, Tauri writes the generated installers under `src-tauri\target\release\bundle\`. Look in the `nsis` and `msi` subfolders for the `.exe` and `.msi` packages. Both installers configure write access for the launcher data folders.
+
+On Linux, run `npx tauri build` on a Linux machine to create AppImage, Debian, and RPM packages under `src-tauri/target/release/bundle/`. On macOS, run the same command on a Mac to create an `.app` bundle and `.dmg` under that directory. Tauri selects the matching `tauri.linux.conf.json` or `tauri.macos.conf.json` automatically. Cross-compiling these packages from Windows is not supported by this setup.
+
+The launcher-managed Java download currently supports Windows x64 only. On Linux and macOS, install Java separately and choose the system or custom Java runtime in launcher settings.
+
+### Publish a GitHub release from a tag
+
+The GitHub Actions release workflow builds Windows, macOS, and Linux packages and attaches them to the same GitHub Release when a version tag is pushed. Before tagging, make sure the tag matches the versions in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, and that the repository Actions secrets and variables used by the release workflow are configured.
+
+Push the commit containing the release changes, then replace `0.2.2` below with the next matching version:
+
+```powershell
+git tag 0.2.2
+git push origin 0.2.2
+```
+
+The release will include the macOS `.dmg` and Linux AppImage (as well as the configured Windows and other Linux packages). The macOS build is not code-signed or notarized by this workflow.
 
 Useful checks:
 

@@ -69,3 +69,74 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
+
+  release-macos:
+    needs: release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          ARCA_MICROSOFT_CLIENT_ID: ${{ vars.ARCA_MICROSOFT_CLIENT_ID }}
+          ARCA_CURSEFORGE_PROXY_URL: ${{ vars.ARCA_CURSEFORGE_PROXY_URL }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Arca Launcher ${{ github.ref_name }}
+          generateReleaseNotes: true
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: false
+
+  release-linux:
+    needs: release-macos
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux bundle dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            file \
+            libfuse2 \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            rpm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          ARCA_MICROSOFT_CLIENT_ID: ${{ vars.ARCA_MICROSOFT_CLIENT_ID }}
+          ARCA_CURSEFORGE_PROXY_URL: ${{ vars.ARCA_CURSEFORGE_PROXY_URL }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Arca Launcher ${{ github.ref_name }}
+          generateReleaseNotes: true
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: false

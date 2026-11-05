@@ -102,6 +102,13 @@ type ChangelogEntry =
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    v: "0.2.2",
+    title: "Cross",
+    items: [
+      "No changes update, only a new cross-platform build for Windows, macOS, and Linux for the release",
+    ],
+  },
+  {
     v: "0.2.1",
     title: "Huge Update",
     sections: [
