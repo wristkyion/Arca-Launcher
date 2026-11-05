@@ -150,28 +150,6 @@ On Linux, run `npx tauri build` on a Linux machine to create AppImage, Debian, a
 
 The launcher-managed Java download currently supports Windows x64 only. On Linux and macOS, install Java separately and choose the system or custom Java runtime in launcher settings.
 
-### Publish a GitHub release from a tag
-
-The GitHub Actions release workflow builds Windows, macOS, and Linux packages and attaches them to the same GitHub Release when a version tag is pushed. Before tagging, make sure the tag matches the versions in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, and that the repository Actions secrets and variables used by the release workflow are configured.
-
-Push the commit containing the release changes, then replace `0.2.2` below with the next matching version:
-
-```powershell
-git tag 0.2.2
-git push origin 0.2.2
-```
-
-The release will include the macOS `.dmg` and Linux AppImage (as well as the configured Windows and other Linux packages). The macOS build is not code-signed or notarized by this workflow.
-
-Useful checks:
-
-```powershell
-npm run build
-cargo check --manifest-path src-tauri\Cargo.toml
-cargo test --manifest-path src-tauri\Cargo.toml
-node --test services\curseforge-proxy\src\index.test.js
-```
-
 ## Publisher integration setup
 
 These steps are for the launcher publisher or developers building a configured release. **End users do not need to enter credentials.** Do not commit secrets or send them in chat.
