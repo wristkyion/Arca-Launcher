@@ -80,25 +80,6 @@ This project is still in early development, so some features may be incomplete, 
 - Moved dialogs into portals, scaled them with the Interface Size setting, and added consistent entrance animations.
 - Streamlined confirmation dialogs and refined their sizing and controls.
 
-### v0.2.0 — Power
-
-#### Features
-
-- Added signed launcher updates. Check for releases, review notes, see download progress, and choose when to install and restart.
-- Modpack installs now carry over the pack name, description, icon, and available thumbnail as the instance background.
-- Expanded content browsing with grid and list views, project details, pagination, and advanced filters.
-
-#### Rework
-
-- Refined the downloader layout, project cards, thumbnails, and sticky navigation.
-- Improved project detail pages with formatted Markdown descriptions and clearer metadata.
-
-#### Fixes and reliability
-
-- Fixed NeoForge detection and installation for newer Minecraft version formats, including 26.x.
-- Kept NeoForge version availability checks consistent with the installer.
-- Automatic updates accept only releases verified with the launcher's configured signing key.
-
 ## Install a release
 
 1. Open [Arca Launcher releases](https://github.com/wristkyion/Arca-Launcher/releases).

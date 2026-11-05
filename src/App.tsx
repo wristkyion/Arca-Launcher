@@ -551,9 +551,13 @@ function AppInner() {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [startup, setStartup] = useState(false);
   const [firstRunOpen, setFirstRunOpen] = useState(false);
+  const [firstRunClosing, setFirstRunClosing] = useState(false);
   const [firstRunStep, setFirstRunStep] = useState(0);
   const [firstRunBusy, setFirstRunBusy] = useState(false);
   const [firstRunError, setFirstRunError] = useState("");
+  const [firstRunTransition, setFirstRunTransition] = useState<"idle" | "exit" | "enter">("idle");
+  const firstRunTransitionTimer = useRef<number | null>(null);
+  const firstRunTransitionLocked = useRef(false);
   const [accountsReady, setAccountsReady] = useState(false);
   const [instancesReady, setInstancesReady] = useState(false);
   const [versionsReady, setVersionsReady] = useState(false);
@@ -694,6 +698,20 @@ function AppInner() {
   const addGameLog = (line: string) => setLog((lines) => [...lines.slice(-400), line]);
 
   const applyList = (r: AccList) => { setAccounts(r.accounts); setSelected(r.selected); setFocusedAccountId(r.selected); setSkinFail(false); };
+  const goToFirstRunStep = (nextStep: number) => {
+    if (firstRunTransitionLocked.current || nextStep === firstRunStep) return;
+    firstRunTransitionLocked.current = true;
+    setFirstRunTransition("exit");
+    firstRunTransitionTimer.current = window.setTimeout(() => {
+      setFirstRunStep(nextStep);
+      setFirstRunTransition("enter");
+      firstRunTransitionTimer.current = window.setTimeout(() => {
+        setFirstRunTransition("idle");
+        firstRunTransitionLocked.current = false;
+        firstRunTransitionTimer.current = null;
+      }, 220);
+    }, 140);
+  };
 
   const loadVersions = () =>
     invoke<VersionInfo[]>("mc_versions")
@@ -867,11 +885,26 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
-    if (settingsLoaded) setFirstRunOpen(!startup);
+    if (settingsLoaded && !startup) setFirstRunOpen(true);
   }, [settingsLoaded, startup]);
 
   useEffect(() => {
+    return () => {
+      if (firstRunTransitionTimer.current !== null) {
+        window.clearTimeout(firstRunTransitionTimer.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const showStartupWizard = () => {
+      if (firstRunTransitionTimer.current !== null) {
+        window.clearTimeout(firstRunTransitionTimer.current);
+        firstRunTransitionTimer.current = null;
+      }
+      firstRunTransitionLocked.current = false;
+      setFirstRunTransition("idle");
+      setFirstRunClosing(false);
       setFirstRunStep(0);
       setFirstRunError("");
       setAddErr("");
@@ -1142,7 +1175,7 @@ function AppInner() {
   };
   const firstRunLogin = async () => {
     setFirstRunError("");
-    if (await addAccount()) setFirstRunStep(2);
+    if (await addAccount()) goToFirstRunStep(2);
   };
   const firstRunInstall = async () => {
     const mc = wMc || vinfo.find((v) => v.kind === "release")?.id || "";
@@ -1167,7 +1200,7 @@ function AppInner() {
       });
       setInstances(list);
       setInstId(list[list.length - 1]?.id ?? "");
-      setFirstRunStep(3);
+      goToFirstRunStep(3);
     } catch (e) {
       setFirstRunError(String(e));
     } finally {
@@ -1181,7 +1214,12 @@ function AppInner() {
         data: { ram, java, instance: instId, settings: st, skins, showCrashReports, startup: true },
       });
       setStartup(true);
-      setFirstRunOpen(false);
+      setFirstRunClosing(true);
+      firstRunTransitionTimer.current = window.setTimeout(() => {
+        setFirstRunOpen(false);
+        setFirstRunClosing(false);
+        firstRunTransitionTimer.current = null;
+      }, 180);
     } catch (e) {
       setFirstRunError(`Could not save setup: ${e}`);
     }
@@ -1629,33 +1667,21 @@ function AppInner() {
   return (
     <div className="shell" style={{ "--shell-height": `${winH / (st.uiScale / 100)}px` } as CSSVars}>
       {firstRunOpen && createPortal(
-        <div className="onboarding-overlay">
+        <div className={"onboarding-overlay" + (firstRunClosing ? " is-closing" : "")}>
           <section className="onboarding-card" aria-labelledby="onboarding-title">
-            <header className="onboarding-brand">
-              <span className="onboarding-logo"><img className="launcher-logo-image" src={LAUNCHER_LOGO} alt="" /></span>
-              <div><b>Arca Launcher</b><span>FIRST-TIME SETUP</span></div>
-            </header>
-            <div className="onboarding-progress" aria-label={`Setup step ${firstRunStep + 1} of 4`}>
-              {["Welcome", "Login", "Instance", "Done"].map((label, index) => (
-                <div key={label} className={"onboarding-progress-step" + (index === firstRunStep ? " active" : "") + (index < firstRunStep ? " complete" : "")}>
-                  <span>{index < firstRunStep ? "✓" : index + 1}</span>{label}
-                </div>
-              ))}
-            </div>
 
+            <div key={firstRunStep} className={`onboarding-step${firstRunTransition === "exit" ? " is-exiting" : firstRunTransition === "enter" ? " is-entering" : ""}`}>
             {firstRunStep === 0 && (
               <div className="onboarding-content onboarding-welcome">
-                <span className="onboarding-art"><Icon n="cube" /></span>
-                <span className="eyebrow">YOUR MINECRAFT, YOUR WAY</span>
                 <h1 id="onboarding-title">Welcome to Arca</h1>
                 <p>Let’s get your launcher ready. Sign in with an account, then create your first Minecraft instance. You can skip either step and set it up later.</p>
-                <button className="btn purple onboarding-primary" onClick={() => { setFirstRunError(""); setFirstRunStep(1); }}>Get started <span>→</span></button>
+                <button className="btn purple onboarding-primary" onClick={() => { setFirstRunError(""); goToFirstRunStep(1); }}>Get started <span>→</span></button>
               </div>
             )}
 
             {firstRunStep === 1 && (
               <div className="onboarding-content">
-                <span className="eyebrow">STEP 1 OF 2</span>
+                <span className="eyebrow">STEP 1 OF 3</span>
                 <h1 id="onboarding-title">Choose how to sign in</h1>
                 <p className="onboarding-description">Use an existing account or create an offline profile. You can add more accounts later.</p>
                 <div className="onboarding-account-types">
@@ -1686,8 +1712,8 @@ function AppInner() {
                 {msCode && addBusy && <div className="code onboarding-code">Enter code <b>{msCode.code}</b> at {msCode.url}</div>}
                 {(firstRunError || addErr) && <div className="err">{firstRunError || addErr}</div>}
                 <footer className="onboarding-actions">
-                  <button className="mini" onClick={() => { setFirstRunError(""); setFirstRunStep(0); }} disabled={addBusy}>Back</button>
-                  <button className="onboarding-skip" onClick={() => { setFirstRunError(""); setFirstRunStep(2); }} disabled={addBusy}>Continue without signing in</button>
+                  <button className="mini" onClick={() => { setFirstRunError(""); goToFirstRunStep(0); }} disabled={addBusy}>Back</button>
+                  <button className="onboarding-skip" onClick={() => { setFirstRunError(""); goToFirstRunStep(2); }} disabled={addBusy}>Continue without signing in</button>
                   <button className="btn purple" onClick={() => void firstRunLogin()} disabled={addBusy}>
                     {addBusy ? "Signing in..." : addKind === "offline" ? "Add account" : "Sign in"}
                   </button>
@@ -1697,7 +1723,7 @@ function AppInner() {
 
             {firstRunStep === 2 && (
               <div className="onboarding-content onboarding-instance">
-                <span className="eyebrow">STEP 2 OF 2</span>
+                <span className="eyebrow">STEP 2 OF 3</span>
                 <h1 id="onboarding-title">Install your first instance</h1>
                 <p className="onboarding-description">Choose a Minecraft release and loader. This can take a few minutes to download.</p>
                 <label>Minecraft version</label>
@@ -1729,8 +1755,8 @@ function AppInner() {
                   </div>
                 )}
                 <footer className="onboarding-actions">
-                  <button className="mini" onClick={() => { setFirstRunError(""); setFirstRunStep(1); }} disabled={firstRunBusy}>Back</button>
-                  <button className="onboarding-skip" onClick={() => { setFirstRunError(""); setFirstRunStep(3); }} disabled={firstRunBusy}>Skip for now</button>
+                  <button className="mini" onClick={() => { setFirstRunError(""); goToFirstRunStep(1); }} disabled={firstRunBusy}>Back</button>
+                  <button className="onboarding-skip" onClick={() => { setFirstRunError(""); goToFirstRunStep(3); }} disabled={firstRunBusy}>Skip for now</button>
                   <button className="btn purple" onClick={() => void firstRunInstall()} disabled={firstRunBusy || !firstRunMc || (wLoader !== "vanilla" && !support?.includes(wLoader))}>
                     {firstRunBusy ? "Installing..." : "Install instance"}
                   </button>
@@ -1739,15 +1765,42 @@ function AppInner() {
             )}
 
             {firstRunStep === 3 && (
+              <div className="onboarding-content onboarding-tips">
+                <span className="eyebrow">QUICK TOUR</span>
+                <h1 id="onboarding-title">A few helpful tips</h1>
+                <p className="onboarding-description">You can change these choices later. Here are a few places to start.</p>
+                <div className="onboarding-tip-list">
+                  <article className="onboarding-tip">
+                    <span>01</span>
+                    <div><b>Keep profiles organized</b><p>Add or switch accounts from Accounts. You can personalize each profile with its own icon and banner.</p></div>
+                  </article>
+                  <article className="onboarding-tip">
+                    <span>02</span>
+                    <div><b>Make another instance anytime</b><p>Instances keep Minecraft versions, loaders, saves, and settings separate. Create and manage them from Instance.</p></div>
+                  </article>
+                  <article className="onboarding-tip">
+                    <span>03</span>
+                    <div><b>Find more content</b><p>Browse mods and modpacks in Downloader. Check Settings to adjust memory, Java, appearance, and more.</p></div>
+                  </article>
+                </div>
+                <footer className="onboarding-actions">
+                  <button className="mini" onClick={() => goToFirstRunStep(2)}>Back</button>
+                  <button className="btn purple" onClick={() => goToFirstRunStep(4)}>Continue</button>
+                </footer>
+              </div>
+            )}
+
+            {firstRunStep === 4 && (
               <div className="onboarding-content onboarding-welcome">
-                <span className="onboarding-art onboarding-success">✓</span>
-                <span className="eyebrow">YOU’RE ALL SET</span>
                 <h1 id="onboarding-title">Ready to play</h1>
                 <p>{current ? `Signed in as ${current.username}.` : "You can sign in any time from Accounts."} {inst ? `${inst.name} is ready to launch.` : "Create an instance whenever you’re ready."}</p>
                 {firstRunError && <div className="err">{firstRunError}</div>}
-                <button className="btn purple onboarding-primary" onClick={() => void finishFirstRun()}>Start using Arca <span>→</span></button>
+                <div className="onboarding-ready-actions">
+                  <button className="btn purple onboarding-primary" onClick={() => void finishFirstRun()}>Start using Arca <span>→</span></button>
+                </div>
               </div>
             )}
+            </div>
           </section>
         </div>,
         getPortalRoot(),
@@ -2037,7 +2090,6 @@ function AppInner() {
                         <h2 id="account-modal-title">{editingAccountId ? "Edit profile appearance" : "Create account"}</h2>
                         <p>{editingAccountId ? "Customize the icon and banner shown for this profile." : "Choose how you want to sign in to Arca Launcher."}</p>
                       </div>
-                      <button className="mini editclose" aria-label="Close dialog" disabled={addBusy} onClick={() => setAddAccountOpen(false)}>×</button>
                     </header>
                     <form className={`editdialogbody account-add-form${editingAccountId ? " account-edit-form" : " account-create-form"}`} onSubmit={(event) => {
                       event.preventDefault();
