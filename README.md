@@ -154,7 +154,7 @@ The launcher-managed Java download currently supports Windows x64 only. On Linux
 
 ### Release (stable)
 
-Download a release for the latest stable version, recommended for everyday use. If you run into a bug, please report it on the [Issues page](https://github.com/wristkyion/Arca-Launcher/issues). Fixes may be included in a future release and can sometimes be tried earlier in a nightly build.
+Download a release for the latest stable version, recommended for everyday use. If you run into a bug, please report it on the [Issues page](https://github.com/wristkyion/Arca-Launcher/issues). Fixes may be included in a future release and can sometimes be tried earlier in a source build.
 
 ### Build from source (latest development version)
 
