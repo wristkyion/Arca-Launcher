@@ -158,7 +158,7 @@ Download a release for the latest stable version, recommended for everyday use. 
 
 ### Build from source (latest development version)
 
-Building from the latest source is for developers and users who want to try recent changes, test new features, or help investigate bugs. These builds may be incomplete or unstable, so they are not recommended for everyday use. A source build reflects the code in the branch or commit you build; it is not necessarily a separate, automatically published nightly release.
+Building from the latest source is for developers and users who want to try recent changes, test new features, or help investigate bugs. These builds may be incomplete or unstable, so they are not recommended for everyday use. A source build reflects the code in the branch or commit you build; it is not necessarily a separate.
 
 ## Publisher integration setup
 
