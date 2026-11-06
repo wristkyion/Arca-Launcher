@@ -5,6 +5,7 @@ mod auth;
 mod content;
 mod game;
 mod instances;
+mod instance_features;
 mod instance_archive;
 mod migration;
 mod mods;
@@ -1312,6 +1313,17 @@ fn instance_dir(id: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
+fn list_instance_screenshots(instance: String) -> Result<Vec<instance_features::Screenshot>, String> { instance_features::screenshots(&instance_dir(&instance)?) }
+#[tauri::command]
+fn list_instance_worlds(instance: String) -> Result<Vec<instance_features::World>, String> { instance_features::worlds(&instance_dir(&instance)?) }
+#[tauri::command]
+fn read_world_nbt(instance: String, world: String) -> Result<String, String> { instance_features::read_nbt(&instance_dir(&instance)?, &world) }
+#[tauri::command]
+fn write_world_nbt(instance: String, world: String, json: String) -> Result<(), String> { instance_features::write_nbt(&instance_dir(&instance)?, &world, &json) }
+#[tauri::command]
+fn get_instance_playtime(instance: String) -> Result<instance_features::Playtime, String> { instance_features::playtime(&instance_dir(&instance)?) }
+
+#[tauri::command]
 async fn list_content(req: ContentReq) -> Result<Vec<content::ContentItem>, String> {
     // A non-async command runs on the main thread; with 50+ mods/packs that means
     // unzipping every file (and base64-encoding any embedded icon) would block the
@@ -2159,6 +2171,11 @@ fn main() {
             mods::content_install,
             mods::modpack_install,
             list_content,
+            list_instance_screenshots,
+            list_instance_worlds,
+            read_world_nbt,
+            write_world_nbt,
+            get_instance_playtime,
             toggle_content,
             delete_content,
             open_instance_folder,

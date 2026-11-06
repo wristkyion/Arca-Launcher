@@ -16,18 +16,27 @@ type Item = {
   dependency: boolean;
   description: string;
 };
-type Kind = "mods" | "resourcepacks" | "shaderpacks";
+type Kind = "mods" | "resourcepacks" | "shaderpacks" | "screenshots" | "worlds" | "playtime";
+type Screenshot = { name: string; data_url: string };
+type World = { name: string; icon: string; modified: number };
+type Playtime = { total_seconds: number; days: { date: string; seconds: number }[] };
 
 const KINDS: { key: Kind; label: string; singular: string; description: string }[] = [
   { key: "mods", label: "Mods", singular: "mod", description: "Manage the mods installed in this instance." },
   { key: "resourcepacks", label: "Resource Packs", singular: "resource pack", description: "Change the look and sounds of Minecraft." },
   { key: "shaderpacks", label: "Shader Packs", singular: "shader pack", description: "Manage visual effects and shaders." },
+  { key: "screenshots", label: "Screenshots", singular: "screenshot", description: "Browse screenshots captured in this instance." },
+  { key: "worlds", label: "Worlds", singular: "world", description: "View your saved Minecraft worlds." },
+  { key: "playtime", label: "Playtime", singular: "session", description: "Review time spent playing this instance." },
 ];
 
 const CONTENT_ICONS: Record<Kind, string> = {
   mods: new URL("../assets/icons/mods.svg", import.meta.url).href,
   resourcepacks: new URL("../assets/icons/texture.svg", import.meta.url).href,
   shaderpacks: new URL("../assets/icons/shaders.svg", import.meta.url).href,
+  screenshots: new URL("../assets/icons/texture.svg", import.meta.url).href,
+  worlds: new URL("../assets/icons/resourcepack.svg", import.meta.url).href,
+  playtime: new URL("../assets/icons/game-settings.svg", import.meta.url).href,
 };
 const ACTION_ICONS = {
   search: new URL("../assets/icons/search.svg", import.meta.url).href,
@@ -80,6 +89,11 @@ export default function ContentPage({
   const { refreshInstalled } = useDownloads();
   const [kind, setKind] = useState<Kind>("mods");
   const [items, setItems] = useState<Item[]>([]);
+  const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
+  const [worlds, setWorlds] = useState<World[]>([]);
+  const [playtime, setPlaytime] = useState<Playtime>({ total_seconds: 0, days: [] });
+  const [selectedWorld, setSelectedWorld] = useState("");
+  const [nbtText, setNbtText] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingOverlayVisible, setLoadingOverlayVisible] = useState(false);
   const [loadingOverlayExiting, setLoadingOverlayExiting] = useState(false);
@@ -118,6 +132,15 @@ export default function ContentPage({
     const startedAt = performance.now();
     setLoading(true);
     setErr("");
+    if (kind === "screenshots" || kind === "worlds" || kind === "playtime") {
+      try {
+        if (kind === "screenshots") setScreenshots(await invoke<Screenshot[]>("list_instance_screenshots", { instance: inst.id }));
+        if (kind === "worlds") setWorlds(await invoke<World[]>("list_instance_worlds", { instance: inst.id }));
+        if (kind === "playtime") setPlaytime(await invoke<Playtime>("get_instance_playtime", { instance: inst.id }));
+      } catch (e) { setErr(String(e)); }
+      finally { setLoading(false); }
+      return;
+    }
     if (clearItems) setItems([]);
     try {
       const nextItems = await invoke<Item[]>("list_content", { req: { instance: inst.id, kind } });
@@ -192,6 +215,19 @@ export default function ContentPage({
   };
 
   const openFolder = () => inst && invoke("open_instance_folder", { instance: inst.id }).catch((e) => setErr(String(e)));
+
+  const openNbt = async (world: string) => {
+    if (!inst) return;
+    setSelectedWorld(world);
+    try { setNbtText(await invoke<string>("read_world_nbt", { instance: inst.id, world })); }
+    catch (e) { setErr(String(e)); }
+  };
+  const saveNbt = async () => {
+    if (!inst || !selectedWorld) return;
+    try { await invoke("write_world_nbt", { instance: inst.id, world: selectedWorld, json: nbtText }); setErr(""); }
+    catch (e) { setErr(String(e)); }
+  };
+  const formatDuration = (seconds: number) => `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 
   return (
     <section className="library-workspace">
@@ -303,7 +339,15 @@ export default function ContentPage({
             <span className="library-loading-spinner" aria-hidden="true" />
           </div>
         )}
-        {!loading && !err && items.length === 0 && (
+        {!loading && !err && kind === "screenshots" && screenshots.length === 0 && (
+          <div className="library-empty"><h3>No screenshots yet</h3><p>Screenshots taken in Minecraft will appear here.</p></div>
+        )}
+        {!loading && kind === "screenshots" && screenshots.length > 0 && <div className="library-grid feature-grid">{screenshots.map((shot) => <article className="library-card" key={shot.name}><img className="library-artwork screenshot-artwork" src={shot.data_url} alt={shot.name} /><div className="library-card-content"><b>{shot.name}</b><a className="mini" href={shot.data_url} download={shot.name}>Save screenshot</a></div></article>)}</div>}
+        {!loading && !err && kind === "worlds" && worlds.length === 0 && <div className="library-empty"><h3>No worlds yet</h3><p>Worlds saved in this instance will appear here.</p></div>}
+        {!loading && kind === "worlds" && worlds.length > 0 && <div className="library-grid feature-grid">{worlds.map((world) => <article className="library-card" key={world.name}><img className="library-artwork world-artwork" src={world.icon || CONTENT_ICONS.worlds} alt="" /><div className="library-card-content"><b>{world.name}</b><button className="mini" onClick={() => void openNbt(world.name)}>Edit world NBT</button></div></article>)}</div>}
+        {selectedWorld && kind === "worlds" && <div className="app-modal-backdrop"><div className="app-modal-card wide world-nbt-modal"><header className="app-modal-header"><h3>Edit {selectedWorld} NBT</h3><button className="mini" onClick={() => setSelectedWorld("")}>Close</button></header><p>Advanced editor: changes directly update this world’s level.dat. An original backup is kept beside it.</p><textarea value={nbtText} onChange={(e) => setNbtText(e.target.value)} spellCheck={false} /><button className="mini" onClick={() => void saveNbt()}>Save NBT</button></div></div>}
+        {kind === "playtime" && <div className="playtime-panel"><h3>Total playtime</h3><strong>{formatDuration(playtime.total_seconds)}</strong><h3>Daily playtime</h3>{playtime.days.length ? playtime.days.map((day) => <div className="playtime-day" key={day.date}><span>{day.date}</span><b>{formatDuration(day.seconds)}</b></div>) : <p>No playtime recorded yet.</p>}</div>}
+        {!loading && !err && kind !== "screenshots" && kind !== "worlds" && kind !== "playtime" && items.length === 0 && (
           <div className="library-empty">
             <div className="library-empty-icon"><img src={CONTENT_ICONS[kind]} alt="" /></div>
             <h3>No {selectedKind.label.toLowerCase()} yet</h3>

@@ -1254,6 +1254,7 @@ pub fn launch(
     let launch_time = std::time::SystemTime::now();
     std::thread::spawn(move || {
         let status = child.wait().ok();
+        crate::instance_features::record_session(&inst2, launch_time, std::time::SystemTime::now());
         let code = status.as_ref().and_then(|s| s.code());
         emit(
             &app2,
