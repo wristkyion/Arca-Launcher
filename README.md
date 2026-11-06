@@ -217,6 +217,10 @@ Author: Your Name
 }
 ```
 
+## Fixes and changes
+
+Version-specific notes about fixes and how they were implemented are in the [`issues`](issues/) folder. For example, see the [0.2.1 Windows launch path fix](issues/0.2.1cross.md).
+
 ## Support
 
 Report bugs or request features through the repository's [Issues](https://github.com/wristkyion/Arca-Launcher/issues). Include your operating system, what you were doing, and the exact error text. Redact usernames, file paths, authentication codes, passwords, access tokens, and API keys from logs or screenshots.

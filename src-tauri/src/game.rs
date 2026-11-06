@@ -888,14 +888,40 @@ fn expand_jvm_arg(a: &Value, vars: &HashMap<&str, String>, id: &str, jar_id: &st
         .collect()
 }
 
+fn java_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(unc_path) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{unc_path}")
+    } else {
+        path.strip_prefix("\\\\?\\").unwrap_or(&path).to_string()
+    }
+}
+
 #[cfg(test)]
 mod launch_argument_tests {
     use super::{
-        expand, expand_jvm_arg, forge_installer_urls, legacy_client_version, maven_path,
+        expand, expand_jvm_arg, forge_installer_urls, java_path, legacy_client_version, maven_path,
         neoforge_version_prefix, sha1_file,
     };
     use serde_json::json;
     use std::collections::HashMap;
+    use std::path::Path;
+
+    #[test]
+    fn java_paths_strip_windows_extended_length_prefixes() {
+        assert_eq!(
+            java_path(Path::new("\\\\?\\D:\\data\\game\\instances\\tis")),
+            "D:\\data\\game\\instances\\tis"
+        );
+        assert_eq!(
+            java_path(Path::new("\\\\?\\UNC\\server\\share\\instances\\tis")),
+            "\\\\server\\share\\instances\\tis"
+        );
+        assert_eq!(
+            java_path(Path::new("D:\\data\\game\\instances\\tis")),
+            "D:\\data\\game\\instances\\tis"
+        );
+    }
 
     #[test]
     fn neoforge_ignore_list_uses_the_inherited_client_jar() {
@@ -1050,10 +1076,10 @@ pub fn launch(
     let mut cp: Vec<String> = collect_libs(v)
         .iter()
         .filter(|f| !f.native)
-        .map(|f| libs_dir.join(&f.path).to_string_lossy().to_string())
+        .map(|f| java_path(&libs_dir.join(&f.path)))
         .filter(|p| seen.insert(p.clone()))
         .collect();
-    cp.push(client_jar.to_string_lossy().to_string());
+    cp.push(java_path(&client_jar));
 
     for sub in ["mods", "resourcepacks", "shaderpacks", "saves", "datapacks"] {
         fs::create_dir_all(inst.join(sub))?;
@@ -1068,7 +1094,7 @@ pub fn launch(
         dir.join("assets")
     };
 
-    let s = |p: PathBuf| p.to_string_lossy().to_string();
+    let s = |p: PathBuf| java_path(&p);
     let mut vars: HashMap<&str, String> = HashMap::new();
     vars.insert("auth_player_name", acc.username.clone());
     vars.insert("auth_uuid", acc.uuid.clone());
