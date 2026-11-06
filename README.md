@@ -102,6 +102,16 @@ On Linux and macOS, install Java separately and choose the system or custom Java
 
 Arca Launcher requires the **Microsoft Edge WebView2 Runtime**. It is already included on most up-to-date Windows installations. If the launcher reports that it is missing, install the [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/), then reopen the launcher.
 
+## What's the difference?
+
+### Release (stable)
+
+Download a release for the latest stable version, recommended for everyday use. If you run into a bug, please report it on the [Issues page](https://github.com/wristkyion/Arca-Launcher/issues). Fixes may be included in a future release and can sometimes be tried earlier in a nightly build.
+
+### Build from source (latest development version)
+
+Building from the latest source is for developers and users who want to try recent changes, test new features, or help investigate bugs. These builds may be incomplete or unstable, so they are not recommended for everyday use. A source build reflects the code in the branch or commit you build; it is not necessarily a separate, automatically published nightly release.
+
 ## Build from source
 
 ### Requirements
