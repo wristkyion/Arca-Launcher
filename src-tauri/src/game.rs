@@ -890,8 +890,12 @@ fn expand_jvm_arg(a: &Value, vars: &HashMap<&str, String>, id: &str, jar_id: &st
 
 fn java_path(path: &Path) -> String {
     let path = path.to_string_lossy();
-    if let Some(unc_path) = path.strip_prefix("\\\\?\\UNC\\") {
-        format!("\\\\{unc_path}")
+    const UNC_PREFIX: &str = "\\\\?\\UNC\\";
+    if path
+        .get(..UNC_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(UNC_PREFIX))
+    {
+        format!("\\\\{}", &path[UNC_PREFIX.len()..])
     } else {
         path.strip_prefix("\\\\?\\").unwrap_or(&path).to_string()
     }
@@ -916,6 +920,18 @@ mod launch_argument_tests {
         assert_eq!(
             java_path(Path::new("\\\\?\\UNC\\server\\share\\instances\\tis")),
             "\\\\server\\share\\instances\\tis"
+        );
+        assert_eq!(
+            java_path(Path::new("\\\\?\\unc\\server\\share\\instances\\tis")),
+            "\\\\server\\share\\instances\\tis"
+        );
+        assert_eq!(
+            java_path(Path::new("\\\\?\\UnC\\server\\share\\instances\\tis")),
+            "\\\\server\\share\\instances\\tis"
+        );
+        assert_eq!(
+            java_path(Path::new("\\\\?\\c:\\data\\game\\instances\\tis")),
+            "c:\\data\\game\\instances\\tis"
         );
         assert_eq!(
             java_path(Path::new("D:\\data\\game\\instances\\tis")),

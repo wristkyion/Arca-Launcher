@@ -629,7 +629,7 @@ fn load_settings() -> Result<Value, String> {
         .filter(|id| !id.is_empty())
         .map(str::to_owned);
     if let Some(client_id) = legacy_ms_client_id {
-        let mut store = accounts::load(&cfg);
+        let mut store = accounts::load(&cfg)?;
         let mut migrated = false;
         for account in &mut store.accounts {
             if account.kind == "microsoft" && account.ms_client_id.is_none() {
@@ -1517,45 +1517,49 @@ struct UpdateAccountProfileReq {
 }
 
 #[tauri::command]
-fn list_accounts() -> AccountList {
+fn list_accounts() -> Result<AccountList, String> {
     let (_, _, cfg) = setup_dirs();
-    view(&accounts::load(&cfg))
+    accounts::load(&cfg).map(|store| view(&store))
 }
 
 #[tauri::command]
 fn update_account_profile(req: UpdateAccountProfileReq) -> Result<AccountList, String> {
     let (_, _, cfg) = setup_dirs();
-    let mut store = accounts::load(&cfg);
-    let Some(account) = store.accounts.iter_mut().find(|account| account.id == req.id) else {
+    let mut store = accounts::load(&cfg)?;
+    let Some(account) = store
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == req.id)
+    else {
         return Err("Account not found".into());
     };
     account.custom_icon = req.custom_icon;
     account.custom_background = req.custom_background;
-    accounts::save(&cfg, &store);
+    accounts::save(&cfg, &store)?;
     Ok(view(&store))
 }
 
 #[tauri::command]
 fn select_account(id: String) -> Result<AccountList, String> {
     let (_, _, cfg) = setup_dirs();
-    let mut s = accounts::load(&cfg);
+    let mut s = accounts::load(&cfg)?;
     if !s.accounts.iter().any(|a| a.id == id) {
         return Err("Account not found".into());
     }
     s.selected = Some(id);
-    accounts::save(&cfg, &s);
+    accounts::save(&cfg, &s)?;
     Ok(view(&s))
 }
 
 #[tauri::command]
 fn remove_account(id: String) -> Result<AccountList, String> {
     let (_, _, cfg) = setup_dirs();
-    let mut s = accounts::load(&cfg);
+    let mut s = accounts::load(&cfg)?;
     s.accounts.retain(|a| a.id != id);
     if s.selected.as_deref() == Some(id.as_str()) {
         s.selected = s.accounts.first().map(|a| a.id.clone());
     }
-    accounts::save(&cfg, &s);
+    accounts::save(&cfg, &s)?;
     Ok(view(&s))
 }
 
@@ -1566,7 +1570,7 @@ async fn add_account(app: AppHandle, req: AddReq) -> Result<AccountList, String>
 
 async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
     let (_, launcher_dir, cfg) = setup_dirs();
-    let mut store = accounts::load(&cfg);
+    let mut store = accounts::load(&cfg).map_err(anyhow::Error::msg)?;
     let custom_icon = req.custom_icon;
     let custom_background = req.custom_background;
 
@@ -1658,7 +1662,7 @@ async fn add(app: AppHandle, req: AddReq) -> anyhow::Result<AccountList> {
         }
     };
     store.selected = Some(id);
-    accounts::save(&cfg, &store);
+    accounts::save(&cfg, &store).map_err(anyhow::Error::msg)?;
     Ok(view(&store))
 }
 
@@ -1842,7 +1846,7 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
 
     // 1. Use the selected saved account (refreshing its token if needed)
     emit(&app, "Logging in...");
-    let mut store = accounts::load(&cfg);
+    let mut store = accounts::load(&cfg).map_err(anyhow::Error::msg)?;
     let sel = store
         .selected
         .clone()
@@ -1885,7 +1889,7 @@ async fn run(app: AppHandle, req: PlayReq) -> anyhow::Result<()> {
         }
         k => anyhow::bail!("Unknown account type {k}"),
     };
-    accounts::save(&cfg, &store);
+    accounts::save(&cfg, &store).map_err(anyhow::Error::msg)?;
     emit(&app, format!("Logged in as {}", account.username));
 
     // 2. Make sure libraries and assets are all there (already-downloaded files are skipped)
