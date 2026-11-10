@@ -1404,6 +1404,135 @@ struct LauncherUpdateCheck {
     update_available: bool,
 }
 
+#[derive(Deserialize)]
+struct MinecraftNewsFeed {
+    entries: Vec<MinecraftNewsSourceEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MinecraftNewsSourceEntry {
+    title: String,
+    tag: Option<String>,
+    category: Option<String>,
+    date: Option<String>,
+    text: Option<String>,
+    play_page_image: Option<MinecraftNewsImage>,
+    read_more_link: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MinecraftNewsImage {
+    url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinecraftNewsEntry {
+    title: String,
+    tag: Option<String>,
+    category: Option<String>,
+    date: Option<String>,
+    text: Option<String>,
+    image_url: Option<String>,
+    link: Option<String>,
+}
+
+fn is_minecraft_news_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|parsed| {
+        parsed.scheme() == "https"
+            && matches!(
+                parsed.host_str(),
+                Some("minecraft.net" | "www.minecraft.net")
+            )
+    })
+}
+
+#[tauri::command]
+async fn get_minecraft_news() -> Result<Vec<MinecraftNewsEntry>, String> {
+    let response = game::http()
+        .get("https://launchercontent.mojang.com/v2/news.json")
+        .send()
+        .await
+        .map_err(|error| format!("Could not load Minecraft news: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Could not load Minecraft news: {error}"))?;
+    let feed: MinecraftNewsFeed = response
+        .json()
+        .await
+        .map_err(|error| format!("Could not read Minecraft news: {error}"))?;
+
+    Ok(feed
+        .entries
+        .into_iter()
+        .take(12)
+        .map(|entry| MinecraftNewsEntry {
+            title: entry.title,
+            tag: entry.tag,
+            category: entry.category,
+            date: entry.date,
+            text: entry.text,
+            image_url: entry
+                .play_page_image
+                .and_then(|image| image.url)
+                .filter(|url| url.starts_with("/v2/images/"))
+                .map(|url| format!("https://launchercontent.mojang.com{url}")),
+            link: entry
+                .read_more_link
+                .filter(|url| is_minecraft_news_url(url)),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn open_minecraft_news(url: String) -> Result<(), String> {
+    if !is_minecraft_news_url(&url) {
+        return Err("This is not a valid Minecraft news link".into());
+    }
+    webbrowser::open(&url)
+        .map(|_| ())
+        .map_err(|error| format!("Could not open Minecraft news: {error}"))
+}
+
+#[cfg(test)]
+mod minecraft_news_tests {
+    use super::{is_minecraft_news_url, MinecraftNewsFeed};
+
+    #[test]
+    fn only_opens_https_minecraft_articles() {
+        assert!(is_minecraft_news_url(
+            "https://www.minecraft.net/article/example"
+        ));
+        assert!(is_minecraft_news_url(
+            "https://minecraft.net/article/example"
+        ));
+        assert!(!is_minecraft_news_url(
+            "https://minecraft.net.evil.example/article/example"
+        ));
+        assert!(!is_minecraft_news_url(
+            "http://www.minecraft.net/article/example"
+        ));
+    }
+
+    #[test]
+    fn decodes_the_public_news_feed_shape() {
+        let feed: MinecraftNewsFeed = serde_json::from_str(
+            r#"{"version":1,"entries":[{"title":"News","tag":null,"category":"Minecraft","date":"2026-11-09","text":"Latest news","playPageImage":{"url":"/v2/images/news.png"},"readMoreLink":"https://www.minecraft.net/article/news"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(feed.entries.len(), 1);
+        assert_eq!(feed.entries[0].title, "News");
+        assert_eq!(
+            feed.entries[0]
+                .play_page_image
+                .as_ref()
+                .and_then(|image| image.url.as_deref()),
+            Some("/v2/images/news.png")
+        );
+    }
+}
+
 fn version_is_newer(candidate: &str, current: &str) -> bool {
     fn components(version: &str) -> Option<Vec<u64>> {
         let version = version
@@ -2185,6 +2314,8 @@ fn main() {
             open_instance_folder,
             open_launcher_releases,
             check_launcher_update,
+            get_minecraft_news,
+            open_minecraft_news,
             finish_startup,
             load_settings,
             save_settings,

@@ -30,6 +30,15 @@ type LauncherUpdateCheck = {
   update_available: boolean;
   notes?: string;
 };
+type MinecraftNewsEntry = {
+  title: string;
+  tag: string | null;
+  category: string | null;
+  date: string | null;
+  text: string | null;
+  imageUrl: string | null;
+  link: string | null;
+};
 type MaintenanceAction = "delete_instances" | "delete_java" | "clean_accounts" | "factory_reset";
 const MAINTENANCE_DETAILS: Record<MaintenanceAction, { title: string; description: string }> = {
   delete_instances: {
@@ -652,6 +661,11 @@ function AppInner() {
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateCheck | null>(null);
   const [updateCheckError, setUpdateCheckError] = useState("");
   const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
+  const [minecraftNews, setMinecraftNews] = useState<MinecraftNewsEntry[]>([]);
+  const [minecraftNewsLoading, setMinecraftNewsLoading] = useState(false);
+  const [minecraftNewsError, setMinecraftNewsError] = useState("");
+  const [minecraftNewsLinkError, setMinecraftNewsLinkError] = useState("");
+  const [minecraftNewsRefresh, setMinecraftNewsRefresh] = useState(0);
   const [updateInstallError, setUpdateInstallError] = useState("");
   const [updateInstallBusy, setUpdateInstallBusy] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
@@ -821,6 +835,34 @@ function AppInner() {
       window.removeEventListener("offline", updateNetworkStatus);
     };
   }, []);
+
+  useEffect(() => {
+    if (page !== "play") return;
+    let active = true;
+    setMinecraftNewsLoading(true);
+    setMinecraftNewsError("");
+    invoke<MinecraftNewsEntry[]>("get_minecraft_news")
+      .then((entries) => {
+        if (active) setMinecraftNews(entries);
+      })
+      .catch((error) => {
+        if (active) setMinecraftNewsError(`Could not load Minecraft news: ${error}`);
+      })
+      .finally(() => {
+        if (active) setMinecraftNewsLoading(false);
+      });
+    return () => { active = false; };
+  }, [page, minecraftNewsRefresh]);
+
+  const openMinecraftNews = async (url: string | null) => {
+    if (!url) return;
+    setMinecraftNewsLinkError("");
+    try {
+      await invoke("open_minecraft_news", { url });
+    } catch (error) {
+      setMinecraftNewsLinkError(`Could not open Minecraft news: ${error}`);
+    }
+  };
 
   useEffect(() => {
     // all settings now live in game/launcher/config/settings.json on the backend
@@ -1846,8 +1888,8 @@ function AppInner() {
         <main className="content">
           <div key={page === "mods" ? "__mods__" : page} className={"pagewrap " + (fade === "out" ? "out" : "in") + (page === "mods" ? " hidden" : "")}>
           {page === "play" && (
-            <>
-              <div className="top">
+            <div className="play-screen">
+              <div className="top play-feature-row">
                 <section className={"hero" + (activeBackground ? " has-bg" : "")}>
                   {activeBackground && <BgPreview className="hero-background" src={activeBackground} />}
                   <div className="pickwrap">
@@ -1886,6 +1928,7 @@ function AppInner() {
                       <b>{gameRunning ? "RUNNING" : busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
                       <small>{gameRunning ? "The instance is running right now" : busy ? status.slice(0, 34) : !current ? "You need an account to play" : !inst ? "Download a version first" : `${inst.name} · ${KIND_LABEL[current.kind]}`}</small>
                       {busy && progress && <span className="bar" style={{ "--progress-width": `${progress.pct}%` } as CSSVars} />}
+                      <span className="launch-arrow" aria-hidden="true">→</span>
                     </button>
                   </div>
                 </section>
@@ -1897,6 +1940,10 @@ function AppInner() {
                     backgroundImage: `linear-gradient(180deg, rgba(10,9,16,.48), rgba(10,9,16,.78) 58%, rgba(10,9,16,.94)), url("${current.custom_background}")`,
                   } : undefined}
                 >
+                  <div className="play-profile-heading">
+                    <span className="eyebrow">PLAYER PROFILE</span>
+                    <span className={"play-profile-state" + (current ? " ready" : "")}><i />{current ? "Ready" : "Account needed"}</span>
+                  </div>
                   {current && skins[current.id]?.data ? (
                     <SkinModel data={skins[current.id]!.data!} slim={skins[current.id]!.slim} className="home-player-model" />
                   ) : current?.kind === "offline" && !skinFail ? (
@@ -1938,11 +1985,14 @@ function AppInner() {
                     </>)}
                   </div>
                 </aside>
-
-                <section className="changelog">
-                  <h4>Changelog</h4>
+                <section className="changelog" aria-label="Launcher changelog">
+                <header className="play-changelog-heading">
+                  <div><span className="eyebrow">WHAT'S NEW</span><h2>Launcher updates</h2></div>
+                  <span className="play-changelog-count">{CHANGELOG.length} releases</span>
+                </header>
+                <div className="play-changelog-list" aria-label="Recent launcher updates">
                   {CHANGELOG.map((c) => (
-                    <div key={c.v} className="cl">
+                    <article key={c.v} className="cl">
                       <div className="clhead"><span className="clv">v{c.v}</span><b>{c.title}</b></div>
                       {"sections" in c
                         ? c.sections.map((section) => (
@@ -1953,12 +2003,95 @@ function AppInner() {
                         ))
                         : <ul>{c.items.map((it) => <li key={it}>{it}</li>)}
                       </ul>}
-                    </div>
+                    </article>
                   ))}
+                </div>
                 </section>
                 </div>
               </div>
-            </>
+              <section className="minecraft-news" aria-label="Minecraft news">
+                <header className="play-news-heading">
+                  <div><span className="eyebrow">FROM MINECRAFT.NET</span><h2>Latest Minecraft news</h2></div>
+                  <span className="play-news-count">{minecraftNews.length ? `${minecraftNews.length} stories` : "Official news feed"}</span>
+                </header>
+                {minecraftNewsError && (
+                  <div className="play-news-status" role="status">
+                    <span>{minecraftNewsError}</span>
+                    <button className="mini" onClick={() => setMinecraftNewsRefresh((value) => value + 1)} disabled={minecraftNewsLoading}>
+                      {minecraftNewsLoading ? "Loading..." : "Retry"}
+                    </button>
+                  </div>
+                )}
+                {minecraftNewsLinkError && <p className="play-news-link-error" role="status">{minecraftNewsLinkError}</p>}
+                <div className="play-news-viewport">
+                  {minecraftNewsLoading && minecraftNews.length === 0
+                    ? <div className="play-news-track is-loading">{Array.from({ length: 4 }, (_, index) => <div key={index} className="play-news-skeleton" aria-hidden="true" />)}</div>
+                    : minecraftNews.length > 0 && (
+                      <div className="play-news-track" style={{ "--news-slide-duration": `${Math.max(45, minecraftNews.length * 5)}s` } as CSSVars}>
+                        {[false, true].map((duplicate) => (
+                          <div key={duplicate ? "clone" : "news"} className="play-news-group" aria-hidden={duplicate || undefined}>
+                            {minecraftNews.map((entry, index) => duplicate ? (
+                              <a
+                                key={`${entry.title}-${entry.date ?? ""}-${index}`}
+                                className="play-news-card"
+                                href={entry.link ?? undefined}
+                                tabIndex={-1}
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  void openMinecraftNews(entry.link);
+                                }}
+                              >
+                                {entry.imageUrl
+                                  ? <img className="play-news-image" src={entry.imageUrl} alt="" loading="lazy" />
+                                  : <span className="play-news-image play-news-image-placeholder" aria-hidden="true" />}
+                                <span className="play-news-copy">
+                                  <span className="play-news-meta">
+                                    <span className="play-news-labels">
+                                      <span className="play-news-tag">{entry.category || "Minecraft"}</span>
+                                      {entry.tag && <span className="play-news-type">{entry.tag}</span>}
+                                    </span>
+                                    {entry.date && <time dateTime={entry.date}>{entry.date}</time>}
+                                  </span>
+                                  <b>{entry.title}</b>
+                                  {entry.text && <span className="play-news-description">{entry.text}</span>}
+                                  {entry.link && <span className="play-news-readmore">Read story <span aria-hidden="true">→</span></span>}
+                                </span>
+                              </a>
+                            ) : (
+                              <button
+                                key={`${entry.title}-${entry.date ?? ""}-${index}`}
+                                className="play-news-card"
+                                onClick={() => void openMinecraftNews(entry.link)}
+                                disabled={!entry.link}
+                                aria-label={entry.link ? `Read ${entry.title}` : entry.title}
+                              >
+                                {entry.imageUrl
+                                  ? <img className="play-news-image" src={entry.imageUrl} alt="" loading="lazy" />
+                                  : <span className="play-news-image play-news-image-placeholder" aria-hidden="true" />}
+                                <span className="play-news-copy">
+                                  <span className="play-news-meta">
+                                    <span className="play-news-labels">
+                                      <span className="play-news-tag">{entry.category || "Minecraft"}</span>
+                                      {entry.tag && <span className="play-news-type">{entry.tag}</span>}
+                                    </span>
+                                    {entry.date && <time dateTime={entry.date}>{entry.date}</time>}
+                                  </span>
+                                  <b>{entry.title}</b>
+                                  {entry.text && <span className="play-news-description">{entry.text}</span>}
+                                  {entry.link && <span className="play-news-readmore">Read story <span aria-hidden="true">→</span></span>}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  {!minecraftNewsLoading && !minecraftNewsError && minecraftNews.length === 0 && (
+                    <p className="play-news-empty">No recent Minecraft news is available right now.</p>
+                  )}
+                </div>
+              </section>
+            </div>
           )}
 
           {page === "account" && (
