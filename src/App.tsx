@@ -747,6 +747,7 @@ function AppInner() {
   // checking assets/libraries/Java) and until it exits. Keeps Launch disabled
   // for the whole play session instead of just the pre-launch checks.
   const [gameRunning, setGameRunning] = useState(false);
+  const [gameRepairing, setGameRepairing] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [activityLog, setActivityLog] = useState<string[]>([]);
   const [msCode, setMsCode] = useState<{ code: string; url: string } | null>(null);
@@ -972,6 +973,9 @@ function AppInner() {
         if (/^Game exited/.test(e.payload)) setGameRunning(false);
       }),
       listen<string>("game-log", (e) => addGameLog(e.payload)),
+      listen<{ status: "started" | "complete" | "failed" }>("game-repair", (e) => {
+        setGameRepairing(e.payload.status === "started");
+      }),
       listen<{ code: string; url: string }>("ms-code", (e) => setMsCode(e.payload)),
     ];
     return () => { subs.forEach((p) => p.then((un) => un())); };
@@ -2039,10 +2043,10 @@ function AppInner() {
                         <path d="m18.5 13 .65 1.35 1.35.65-1.35.65-.65 1.35-.65-1.35-1.35-.65 1.35-.65.65-1.35Z" />
                       </svg>
                     </button>
-                    <button className={"launch" + (gameRunning ? " is-running" : "")} disabled={busy || gameRunning}
+                    <button className={"launch" + (gameRunning ? " is-running" : "")} disabled={busy || gameRunning || gameRepairing}
                       onClick={!current ? () => setPage("account") : !inst ? newInstance : play}>
-                      <b>{gameRunning ? "RUNNING" : busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
-                      <small>{gameRunning ? "The instance is running right now" : busy ? status.slice(0, 34) : !current ? "You need an account to play" : !inst ? "Download a version first" : `${inst.name} · ${KIND_LABEL[current.kind]}`}</small>
+                      <b>{gameRunning ? "RUNNING" : gameRepairing ? "REPAIRING..." : busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
+                      <small>{gameRunning ? "The instance is running right now" : gameRepairing ? "Checking and repairing game files" : busy ? status.slice(0, 34) : !current ? "You need an account to play" : !inst ? "Download a version first" : `${inst.name} · ${KIND_LABEL[current.kind]}`}</small>
                       {busy && progress && <span className="bar" style={{ "--progress-width": `${progress.pct}%` } as CSSVars} />}
                       <span className="launch-arrow" aria-hidden="true">→</span>
                     </button>
@@ -3024,7 +3028,7 @@ function AppInner() {
             {maintenanceMessage.startsWith("Could not") && (
               <p className="setting-error" role="alert">{maintenanceMessage}</p>
             )}
-            {(anyRunning || busy || javaRuntimeBusy || gameRunning) && (
+            {(anyRunning || busy || javaRuntimeBusy || gameRunning || gameRepairing) && (
               <p className="setting-error" role="alert">
                 Finish active downloads, Java downloads, and close Minecraft before running maintenance.
               </p>
@@ -3034,7 +3038,7 @@ function AppInner() {
               <button
                 className="mini danger"
                 onClick={() => void runMaintenanceAction()}
-                disabled={maintenanceBusy || anyRunning || busy || javaRuntimeBusy || gameRunning}
+                disabled={maintenanceBusy || anyRunning || busy || javaRuntimeBusy || gameRunning || gameRepairing}
               >
                 {maintenanceBusy ? "Working..." : maintenanceAction === "factory_reset" ? "Reset everything" : "Confirm"}
               </button>

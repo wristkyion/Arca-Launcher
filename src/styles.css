@@ -1124,6 +1124,8 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 }
 .crashdialog.pop { animation: popIn .22s cubic-bezier(.2,.9,.3,1.1) both; }
 .crashdialog > .seg { margin: 16px 18px 0; }
+.crash-repair-status { margin: 10px 18px 0; color: var(--mute); font-size: 12px; }
+.crash-repair-status.failed { color: #fca5a5; }
 .crashdialog > .crashlog { margin: 10px 18px 0; }
 .crashdialog > .btnrow { margin: 12px 18px 16px; }
 .crashlog { max-height: 320px; overflow: auto; background: rgba(0,0,0,0.35); padding: 10px; border-radius: 8px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }

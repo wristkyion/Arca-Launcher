@@ -600,7 +600,7 @@ pub fn resolve(dir: &Path, id: &str) -> Result<Value> {
         .into_iter()
         .flatten()
         .chain(parent["libraries"].as_array().into_iter().flatten())
-        .filter(|l| seen.insert(lib_key(l)))
+        .filter(|l| rules_ok(l.get("rules")) && seen.insert(lib_key(l)))
         .cloned()
         .collect();
     out["libraries"] = Value::Array(libs);
@@ -905,7 +905,7 @@ fn java_path(path: &Path) -> String {
 mod launch_argument_tests {
     use super::{
         expand, expand_jvm_arg, forge_installer_urls, java_path, legacy_client_version, maven_path,
-        neoforge_version_prefix, sha1_file,
+        neoforge_version_prefix, resolve, sha1_file, OS,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1026,6 +1026,49 @@ mod launch_argument_tests {
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn resolve_keeps_platform_allowed_library_when_disallowed_version_comes_first() {
+        let dir = std::env::temp_dir().join(format!("arca-version-{}", uuid::Uuid::new_v4()));
+        let parent_dir = dir.join("versions").join("parent");
+        let child_dir = dir.join("versions").join("child");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let parent = json!({
+            "id": "parent",
+            "libraries": [
+                {
+                    "name": "org.lwjgl:lwjgl-glfw:3.2.1",
+                    "rules": [{"action": "allow", "os": {"name": "other"}}]
+                },
+                {
+                    "name": "org.lwjgl:lwjgl-glfw:3.2.2",
+                    "rules": [{"action": "allow", "os": {"name": OS}}]
+                }
+            ]
+        });
+        let child = json!({
+            "id": "child",
+            "inheritsFrom": "parent",
+            "libraries": []
+        });
+        std::fs::write(
+            parent_dir.join("parent.json"),
+            serde_json::to_vec(&parent).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("child.json"),
+            serde_json::to_vec(&child).unwrap(),
+        )
+        .unwrap();
+
+        let resolved = resolve(&dir, "child").unwrap();
+        let libraries = resolved["libraries"].as_array().unwrap();
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0]["name"], "org.lwjgl:lwjgl-glfw:3.2.2");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -1267,6 +1310,9 @@ pub fn launch(
     let app2 = app.clone();
     let restore = o.hide == "hide";
     let inst2 = inst.to_path_buf();
+    let repair_dir = dir.to_path_buf();
+    let repair_id = id.to_owned();
+    let repair_version = v.clone();
     let launch_time = std::time::SystemTime::now();
     std::thread::spawn(move || {
         let status = child.wait().ok();
@@ -1289,8 +1335,51 @@ pub fn launch(
                     "code": code,
                     "log_tail": tail,
                     "crash_report": report,
+                    "repair_status": "checking",
                 }),
             );
+            let _ = app2.emit(
+                "game-repair",
+                serde_json::json!({ "status": "started" }),
+            );
+            let repair_app = app2.clone();
+            let repair_inst = inst2.clone();
+            tauri::async_runtime::spawn(async move {
+                emit(&repair_app, "Checking game files after crash");
+                let result = async {
+                    prepare_instance(&repair_inst)?;
+                    install_deps(
+                        &repair_app,
+                        &http(),
+                        &repair_dir,
+                        &repair_id,
+                        &repair_version,
+                        &repair_inst,
+                    )
+                    .await
+                }
+                .await;
+
+                match result {
+                    Ok(()) => {
+                        emit(&repair_app, "Automatic repair check completed");
+                        let _ = repair_app.emit(
+                            "game-repair",
+                            serde_json::json!({ "status": "complete" }),
+                        );
+                    }
+                    Err(error) => {
+                        emit(&repair_app, format!("Automatic repair failed: {error}"));
+                        let _ = repair_app.emit(
+                            "game-repair",
+                            serde_json::json!({
+                                "status": "failed",
+                                "error": error.to_string(),
+                            }),
+                        );
+                    }
+                }
+            });
         }
 
         if restore {
