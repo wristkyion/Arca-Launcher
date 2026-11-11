@@ -529,7 +529,6 @@ export default function ModsPage({
               </div>}
               <div className="mods-card-compat">
                 {h.game_versions.slice(0, 2).map((version) => <span key={version}>{version}</span>)}
-                {h.loaders.slice(0, 2).map((loader) => <span key={loader}>{cap(loader)}</span>)}
               </div>
 
               {isInstalled && isOpen && files && (

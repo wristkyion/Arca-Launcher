@@ -536,8 +536,11 @@ export function DownloadsFloat() {
                   onError={(e) => e.currentTarget.classList.add("is-hidden")} />
               : <span className="taskitem-icon-ph" />}
             <div className="taskitem-info">
-              <div className="taskitem-title">{t.title}</div>
-              <div className={"taskitem-status status-" + t.phase}>{t.detail}</div>
+                <div className="taskitem-title-row">
+                  <div className="taskitem-title">{t.title}</div>
+                  {t.phase === "running" && t.pct != null && <span className="taskitem-pct">{t.pct}%</span>}
+                </div>
+                <div className={"taskitem-status status-" + t.phase}>{t.detail}</div>
               {t.phase === "running" && (
                 <div
                   className="taskitem-progress"
@@ -555,9 +558,6 @@ export function DownloadsFloat() {
               )}
             </div>
             <div className="taskitem-actions">
-              {t.phase === "running" && t.pct != null && (
-                <span className="taskitem-pct">{t.pct}%</span>
-              )}
               {(t.phase === "running" || t.phase === "queued") && t.cancel
                 ? <button className="taskitem-btn cancel" onClick={() => t.cancel?.()}>Cancel</button>
                 : t.phase === "cancelling"

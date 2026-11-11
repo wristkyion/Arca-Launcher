@@ -355,7 +355,7 @@ export default function ContentPage({
           <span className="library-side-label">SEARCH</span>
           <div className="library-search-wrap">
             <img className="library-search-icon" src={ACTION_ICONS.search} alt="" />
-            <input aria-label={`Search ${selectedKind.label}`} placeholder={`Search ${selectedKind.label.toLowerCase()}...`} value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input className="library-search-input" aria-label={`Search ${selectedKind.label}`} placeholder={`Search ${selectedKind.label.toLowerCase()}...`} value={query} onChange={(event) => setQuery(event.target.value)} />
             {query && <button className="mini library-clear-search" onClick={() => setQuery("")} aria-label="Clear search"><img src={ACTION_ICONS.close} alt="" /></button>}
           </div>
         </div>}

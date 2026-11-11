@@ -52,6 +52,14 @@ This project is still in early development, so some features may be incomplete, 
 
 ## Changelog
 
+### v0.2.3 — Patch
+
+- Fixed a bug where the launcher would crash on startup on some systems.
+- Redesigned and reworked the launcher pages for an improved experience.
+- Fixed Forge installation path handling.
+- Added screenshots, world information, and playtime to content selection.
+- Introduced a redesigned Play Screen with a refreshed look and layout.
+
 ### v0.2.2 — Cross
 
 - Added Linux AppImage, Debian, and RPM bundle configuration.

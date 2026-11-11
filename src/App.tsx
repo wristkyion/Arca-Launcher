@@ -112,6 +112,17 @@ type ChangelogEntry =
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    v: "0.2.3",
+    title: "Patch",
+    items: [
+      "Fixed a bug where the launcher would crash on startup on some systems.",
+      "Redesigned and reworked the launcher pages for an improved experience.",
+      "Fixed Forge installation path handling.",
+      "Added screenshots, world information, and playtime to content selection.",
+      "Introduced a redesigned Play Screen with a refreshed look and layout.",
+    ],
+  },
+  {
     v: "0.2.2",
     title: "Cross",
     items: [
@@ -2612,6 +2623,7 @@ function AppInner() {
                     <label className="instance-search">
                       <span className="instance-search-glyph" aria-hidden="true" />
                       <input
+                        className="instance-search-input"
                         type="text"
                         value={instanceSearch}
                         onChange={(event) => setInstanceSearch(event.target.value)}
