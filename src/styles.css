@@ -1696,11 +1696,11 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 .new-step-heading h3 { margin: 5px 0 0; padding-top: 0; border-top: 0; font-size: 16px; letter-spacing: -.2px; }
 .new-step-heading p { margin: 4px 0 0; color: var(--mute); font-size: 11px; line-height: 1.5; }
 .new-step-count { flex: 0 0 auto; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(0,0,0,.14); color: #c4b5fd; font-size: 10px; }
-.version-search { min-height: 38px; display: flex; align-items: center; gap: 10px; margin: 0; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(0,0,0,.16); }
-.version-search:focus-within { border-color: rgba(167,139,250,.55); box-shadow: 0 0 0 3px rgba(124,58,237,.1); }
-.version-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 11px; }
-.version-search input:focus { box-shadow: none; }
-.version-search input::placeholder { color: var(--mute); }
+.version-search { min-height: 38px; display: flex; align-items: center; gap: 10px; margin: 0; padding: 0; border: 0; background: transparent; }
+.version-search:focus-within { box-shadow: none; }
+.version-search input.version-search-input { width: 100%; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: 0; background: transparent; box-shadow: none; color: var(--text); font-size: 11px; }
+.version-search input.version-search-input:focus { border: 0; background: transparent; box-shadow: none; }
+.version-search input.version-search-input::placeholder { color: var(--mute); }
 .new-instance-step .vlist { min-height: 130px; margin-top: 0; }
 .new-instance-step .vrow { min-height: 48px; padding: 8px 11px; border-color: rgba(255,255,255,.045); background: rgba(255,255,255,.025); transition: border-color .15s ease, background .15s ease, transform .15s ease; }
 .new-instance-step .vrow:hover { transform: translateX(2px); border-color: rgba(167,139,250,.38); background: rgba(124,58,237,.075); }
@@ -3764,7 +3764,7 @@ button, input, select { transition: background .15s, color .15s, border-color .1
 }
 .shell:not(.play-mode) .content button:focus-visible,
 .shell:not(.play-mode) .content a:focus-visible,
-.shell:not(.play-mode) .content input:focus-visible:not(.instance-search-input),
+.shell:not(.play-mode) .content input:focus-visible:not(.instance-search-input):not(.version-search-input),
 .shell:not(.play-mode) .content select:focus-visible {
   outline: 2px solid rgba(167,139,250,.8);
   outline-offset: 2px;
@@ -3774,7 +3774,7 @@ button, input, select { transition: background .15s, color .15s, border-color .1
   filter: saturate(.65);
 }
 
-.shell:not(.play-mode) .content input:not([type="checkbox"]):not([type="range"]):not([type="radio"]):not(.mods-search):not(.library-search-input):not(.instance-search-input),
+.shell:not(.play-mode) .content input:not([type="checkbox"]):not([type="range"]):not([type="radio"]):not(.mods-search):not(.library-search-input):not(.instance-search-input):not(.version-search-input),
 .shell:not(.play-mode) .content select {
   border: 1px solid rgba(255,255,255,.095);
   border-radius: 10px;
@@ -3782,11 +3782,11 @@ button, input, select { transition: background .15s, color .15s, border-color .1
   color: var(--text);
   transition: border-color .16s ease, background-color .16s ease, box-shadow .16s ease;
 }
-.shell:not(.play-mode) .content input:not([type="checkbox"]):not([type="range"]):not([type="radio"]):not(.mods-search):not(.library-search-input):not(.instance-search-input):hover,
+.shell:not(.play-mode) .content input:not([type="checkbox"]):not([type="range"]):not([type="radio"]):not(.mods-search):not(.library-search-input):not(.instance-search-input):not(.version-search-input):hover,
 .shell:not(.play-mode) .content select:hover {
   border-color: rgba(167,139,250,.3);
 }
-.shell:not(.play-mode) .content input:not([type="checkbox"]):not([type="range"]):not([type="radio"]):not(.mods-search):not(.library-search-input):not(.instance-search-input):focus,
+.shell:not(.play-mode) .content input:not([type="checkbox"]):not([type="range"]):not([type="radio"]):not(.mods-search):not(.library-search-input):not(.instance-search-input):not(.version-search-input):focus,
 .shell:not(.play-mode) .content select:focus {
   border-color: rgba(167,139,250,.62);
   background-color: rgba(13,11,21,.78);
@@ -3982,4 +3982,15 @@ button, input, select { transition: background .15s, color .15s, border-color .1
   border-color: rgba(167,139,250,.38);
   background: rgba(124,58,237,.42);
   color: #fff;
+}
+
+.version-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text);
+    font-size: 11px;
 }

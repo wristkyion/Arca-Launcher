@@ -817,67 +817,6 @@ struct InstanceDirectoryResult {
     warning: Option<String>,
 }
 
-fn copy_directory_contents(
-    source: &Path,
-    destination: &Path,
-    created: &mut Vec<PathBuf>,
-) -> Result<(), String> {
-    for entry in
-        std::fs::read_dir(source).map_err(|e| format!("Could not read instance folder: {e}"))?
-    {
-        let entry = entry.map_err(|e| format!("Could not read instance folder entry: {e}"))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Could not inspect {}: {e}", source_path.display()))?;
-        if file_type.is_dir() {
-            std::fs::create_dir(&destination_path)
-                .map_err(|e| format!("Could not create {}: {e}", destination_path.display()))?;
-            created.push(destination_path.clone());
-            copy_directory_contents(&source_path, &destination_path, created)?;
-        } else if file_type.is_file() {
-            let mut input = std::fs::File::open(&source_path)
-                .map_err(|e| format!("Could not read {}: {e}", source_path.display()))?;
-            let mut output = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&destination_path)
-                .map_err(|e| format!("Could not create {}: {e}", destination_path.display()))?;
-            created.push(destination_path.clone());
-            std::io::copy(&mut input, &mut output)
-                .map_err(|e| format!("Could not copy {}: {e}", source_path.display()))?;
-        } else {
-            return Err(format!(
-                "Unsupported file type in instance folder: {}",
-                source_path.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn remove_copied_paths(paths: &[PathBuf]) -> Result<(), String> {
-    for path in paths.iter().rev() {
-        let file_type = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata.file_type(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("Could not inspect {}: {error}", path.display())),
-        };
-        if file_type.is_dir() {
-            std::fs::remove_dir_all(path)
-                .map_err(|e| format!("Could not remove {}: {e}", path.display()))?;
-        } else {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("Could not remove {}: {error}", path.display())),
-            }
-        }
-    }
-    Ok(())
-}
-
 #[tauri::command]
 fn set_instance_directory(path: String) -> Result<InstanceDirectoryResult, String> {
     let path = path.trim();
@@ -893,28 +832,19 @@ fn set_instance_directory(path: String) -> Result<InstanceDirectoryResult, Strin
     let destination = std::fs::canonicalize(&requested)
         .map_err(|e| format!("Could not resolve instance folder: {e}"))?;
     let source = instance_root()?;
-    std::fs::create_dir_all(&source)
-        .map_err(|e| format!("Could not create current instance folder: {e}"))?;
-    let source = std::fs::canonicalize(&source)
-        .map_err(|e| format!("Could not resolve current instance folder: {e}"))?;
-    if source == destination {
+    let source = if source.exists() {
+        Some(
+            std::fs::canonicalize(&source)
+                .map_err(|e| format!("Could not resolve current instance folder: {e}"))?,
+        )
+    } else {
+        None
+    };
+    if source.as_ref() == Some(&destination) {
         return Ok(InstanceDirectoryResult {
             path: destination.to_string_lossy().into_owned(),
             warning: None,
         });
-    }
-    if source.starts_with(&destination) || destination.starts_with(&source) {
-        return Err(
-            "The new instance folder cannot contain, or be inside, the current instance folder"
-                .into(),
-        );
-    }
-    if std::fs::read_dir(&destination)
-        .map_err(|e| format!("Could not inspect instance folder: {e}"))?
-        .next()
-        .is_some()
-    {
-        return Err("Choose an empty folder so existing instances can be moved safely".into());
     }
 
     let (_, _, cfg) = setup_dirs();
@@ -939,29 +869,12 @@ fn set_instance_directory(path: String) -> Result<InstanceDirectoryResult, Strin
     let serialized = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("Could not serialize settings: {e}"))?;
 
-    let mut copied_paths = Vec::new();
-    if let Err(error) = copy_directory_contents(&source, &destination, &mut copied_paths) {
-        let cleanup = remove_copied_paths(&copied_paths).err();
-        return Err(match cleanup {
-            Some(cleanup_error) => format!("{error}; partial copy cleanup failed: {cleanup_error}"),
-            None => error,
-        });
-    }
+    std::fs::write(&settings_path, serialized)
+        .map_err(|e| format!("Could not save instance folder setting: {e}"))?;
 
-    if let Err(error) = std::fs::write(&settings_path, serialized) {
-        let cleanup = remove_copied_paths(&copied_paths).err();
-        return Err(match cleanup {
-            Some(cleanup_error) => format!("Could not save instance folder setting: {error}; partial copy cleanup failed: {cleanup_error}"),
-            None => format!("Could not save instance folder setting: {error}"),
-        });
-    }
-
-    let warning = std::fs::remove_dir_all(&source)
-        .err()
-        .map(|e| format!("New folder is active, but old instance files could not be removed: {e}"));
     Ok(InstanceDirectoryResult {
         path: destination.to_string_lossy().into_owned(),
-        warning,
+        warning: None,
     })
 }
 

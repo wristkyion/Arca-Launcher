@@ -853,8 +853,21 @@ pub async fn install_deps(
         .map(|f| libs_dir.join(&f.path))
         .collect();
     let mut wanted = HashSet::new();
+    let mut owners: HashMap<String, String> = HashMap::new();
     for jar in &native_jars {
-        wanted.extend(native_file_names(jar)?);
+        let label = jar
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for name in native_file_names(jar)? {
+            if let Some(prev) = owners.insert(name.clone(), label.clone()) {
+                emit(
+                    app,
+                    format!("Native file {name} is in both {prev} and {label}; the later one overwrites it"),
+                );
+            }
+            wanted.insert(name);
+        }
     }
     if let Ok(entries) = fs::read_dir(&natives_dir) {
         for entry in entries.flatten() {
@@ -1419,6 +1432,34 @@ pub fn launch(
         _ => ram,
     };
 
+    // Log what the game starts with, with the access token hidden, so account and argument
+    // problems (e.g. the wrong userType) can be seen in the game log.
+    let hide_token = |s: String| {
+        if acc.token.is_empty() {
+            s
+        } else {
+            s.replace(&acc.token, "<redacted>")
+        }
+    };
+    emit_game_log(
+        app,
+        format!("Account: userType={} javaagent={}", acc.user_type, acc.jvm.join(" ")),
+    );
+    let jvm_line: Vec<String> = std::iter::once(format!("-Xmx{effective_ram}M"))
+        .chain(acc.jvm.iter().cloned())
+        .chain(filtered_jvm.iter().cloned())
+        .chain(o.jvm_args.iter().cloned())
+        .collect();
+    let game_line: Vec<String> = game.iter().chain(o.game_args.iter()).cloned().collect();
+    emit_game_log(
+        app,
+        hide_token(format!(
+            "Command: {java} {} {main_class} {}",
+            jvm_line.join(" "),
+            game_line.join(" ")
+        )),
+    );
+
     // user JVM args come after the defaults, so e.g. their own -Xmx wins
     let mut cmd = Command::new(java);
     #[cfg(windows)]
@@ -1493,57 +1534,61 @@ pub fn launch(
         });
         let looks_crashed = report.is_some() || (code.is_some_and(|c| c != 0) && jvm_failed);
         if looks_crashed {
+            let needs_repair =
+                crash_points_at_files(report.as_ref().map(|r| r.content.as_str()), &tail);
             let _ = app2.emit(
                 "game-crash",
                 serde_json::json!({
                     "code": code,
                     "log_tail": tail,
                     "crash_report": report,
-                    "repair_status": "checking",
+                    "repair_status": if needs_repair { "checking" } else { "skipped" },
                 }),
             );
-            let _ = app2.emit(
-                "game-repair",
-                serde_json::json!({ "status": "started" }),
-            );
-            let repair_app = app2.clone();
-            let repair_inst = inst2.clone();
-            tauri::async_runtime::spawn(async move {
-                emit(&repair_app, "Checking game files after crash");
-                let result = async {
-                    prepare_instance(&repair_inst)?;
-                    install_deps(
-                        &repair_app,
-                        &http(),
-                        &repair_dir,
-                        &repair_id,
-                        &repair_version,
-                        &repair_inst,
-                    )
-                    .await
-                }
-                .await;
+            if needs_repair {
+                let _ = app2.emit(
+                    "game-repair",
+                    serde_json::json!({ "status": "started" }),
+                );
+                let repair_app = app2.clone();
+                let repair_inst = inst2.clone();
+                tauri::async_runtime::spawn(async move {
+                    emit(&repair_app, "Checking game files after crash");
+                    let result = async {
+                        prepare_instance(&repair_inst)?;
+                        install_deps(
+                            &repair_app,
+                            &http(),
+                            &repair_dir,
+                            &repair_id,
+                            &repair_version,
+                            &repair_inst,
+                        )
+                        .await
+                    }
+                    .await;
 
-                match result {
-                    Ok(()) => {
-                        emit(&repair_app, "Automatic repair check completed");
-                        let _ = repair_app.emit(
-                            "game-repair",
-                            serde_json::json!({ "status": "complete" }),
-                        );
+                    match result {
+                        Ok(()) => {
+                            emit(&repair_app, "Automatic repair check completed");
+                            let _ = repair_app.emit(
+                                "game-repair",
+                                serde_json::json!({ "status": "complete" }),
+                            );
+                        }
+                        Err(error) => {
+                            emit(&repair_app, format!("Automatic repair failed: {error}"));
+                            let _ = repair_app.emit(
+                                "game-repair",
+                                serde_json::json!({
+                                    "status": "failed",
+                                    "error": error.to_string(),
+                                }),
+                            );
+                        }
                     }
-                    Err(error) => {
-                        emit(&repair_app, format!("Automatic repair failed: {error}"));
-                        let _ = repair_app.emit(
-                            "game-repair",
-                            serde_json::json!({
-                                "status": "failed",
-                                "error": error.to_string(),
-                            }),
-                        );
-                    }
-                }
-            });
+                });
+            }
         }
 
         if restore {
@@ -1585,6 +1630,22 @@ struct CrashReport {
 
 /// Newest crash-reports/*.txt written since launch, if any — Minecraft writes one on most
 /// in-game crashes (not on e.g. a missing-library exit, where the log tail is all you get).
+/// True when a crash looks like missing or broken game files (a library, native or jar).
+/// Re-downloading only helps in those cases, so other crashes (e.g. in a mod) skip the repair.
+fn crash_points_at_files(report: Option<&str>, tail: &[String]) -> bool {
+    const MARKERS: [&str; 6] = [
+        "NoClassDefFoundError",
+        "UnsatisfiedLinkError",
+        "Failed to locate library",
+        "Failed to load a library",
+        "Could not find or load main class",
+        "ZipException",
+    ];
+    let in_report = report.is_some_and(|r| MARKERS.iter().any(|m| r.contains(m)));
+    let in_log = tail.iter().any(|l| MARKERS.iter().any(|m| l.contains(m)));
+    in_report || in_log
+}
+
 fn find_crash_report(inst: &Path, after: std::time::SystemTime) -> Option<CrashReport> {
     let dir = inst.join("crash-reports");
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;

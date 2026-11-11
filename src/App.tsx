@@ -747,6 +747,9 @@ function AppInner() {
   // checking assets/libraries/Java) and until it exits. Keeps Launch disabled
   // for the whole play session instead of just the pre-launch checks.
   const [gameRunning, setGameRunning] = useState(false);
+  // Set by the "Game exited" event. That event can arrive before play() returns (a game that
+  // dies at startup), so play() must not switch back to "running" afterwards.
+  const gameExitedRef = useRef(false);
   const [gameRepairing, setGameRepairing] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [activityLog, setActivityLog] = useState<string[]>([]);
@@ -970,7 +973,10 @@ function AppInner() {
       listen<string>("progress", (e) => {
         add(e.payload);
         // Emitted from the backend once the spawned Minecraft process exits.
-        if (/^Game exited/.test(e.payload)) setGameRunning(false);
+        if (/^Game exited/.test(e.payload)) {
+          gameExitedRef.current = true;
+          setGameRunning(false);
+        }
       }),
       listen<string>("game-log", (e) => addGameLog(e.payload)),
       listen<{ status: "started" | "complete" | "failed" }>("game-repair", (e) => {
@@ -1231,6 +1237,7 @@ function AppInner() {
     if (!inst) return;
     setBusy(true);
     setMsCode(null);
+    gameExitedRef.current = false;
     try {
       const gameArgs = st.launchFullscreen && !/(^|\s)--fullscreen(?:\s|$)/i.test(st.gameArgs)
         ? `${st.gameArgs} --fullscreen`.trim()
@@ -1247,7 +1254,7 @@ function AppInner() {
       // The backend's `play` command returns once the process is spawned (right
       // after the asset/library/Java checks), not when the game exits — so this
       // is the moment to switch from "busy/checking" to "the instance is running".
-      setGameRunning(true);
+      if (!gameExitedRef.current) setGameRunning(true);
     } catch (e) {
       add(`ERROR: ${e}`);
       setPage("console");
@@ -1369,31 +1376,22 @@ function AppInner() {
         defaultPath: instanceDirectoryDraft || undefined,
       });
       if (typeof selected === "string") {
-        setInstanceDirectoryDraft(selected);
         setInstanceDirectoryMessage("");
+        setInstanceDirectoryBusy(true);
+        try {
+          const result = await invoke<{ path: string }>("set_instance_directory", {
+            path: selected,
+          });
+          setInstanceDirectoryDraft(result.path);
+          set("instanceDirectory", result.path);
+        } catch (error) {
+          setInstanceDirectoryMessage(`Could not change instance folder: ${error}`);
+        } finally {
+          setInstanceDirectoryBusy(false);
+        }
       }
     } catch (error) {
       setInstanceDirectoryMessage(`Could not open folder picker: ${error}`);
-    }
-  };
-
-  const changeInstanceDirectory = async () => {
-    setInstanceDirectoryBusy(true);
-    setInstanceDirectoryMessage("");
-    try {
-      const result = await invoke<{ path: string; warning?: string | null }>("set_instance_directory", {
-        path: instanceDirectoryDraft,
-      });
-      setInstanceDirectoryDraft(result.path);
-      set("instanceDirectory", result.path);
-      const alreadySet = st.instanceDirectory.toLowerCase() === result.path.toLowerCase();
-      setInstanceDirectoryMessage(result.warning ?? (alreadySet
-        ? "This is already the active instance folder."
-        : "Instance folder changed. Existing instances were moved when present."));
-    } catch (error) {
-      setInstanceDirectoryMessage(`Could not change instance folder: ${error}`);
-    } finally {
-      setInstanceDirectoryBusy(false);
     }
   };
   const runMaintenanceAction = async () => {
@@ -2519,7 +2517,7 @@ function AppInner() {
                   </div>
                   <label className="version-search">
                     <span className="instance-search-glyph" aria-hidden="true" />
-                    <input placeholder="Search versions, e.g. 1.20.4..." value={filter} onChange={(e) => { setFilter(e.target.value); setVersionPage(1); }} />
+                    <input className="version-search-input" placeholder="Search versions, e.g. 1.20.4..." value={filter} onChange={(e) => { setFilter(e.target.value); setVersionPage(1); }} />
                   </label>
                   <div className="vlist">
                     {pagedVersions.map((v) => (
@@ -2854,12 +2852,10 @@ function AppInner() {
                         <span className="folder-picker-path" title={displayPath(instanceDirectoryDraft) || "No folder selected"}>
                           {displayPath(instanceDirectoryDraft) || "No folder selected"}
                         </span>
-                        <button className="mini" onClick={chooseInstanceDirectory} disabled={instanceDirectoryBusy}>Browse…</button>
+                        <button className="mini" onClick={chooseInstanceDirectory} disabled={instanceDirectoryBusy}>
+                          {instanceDirectoryBusy ? "Setting..." : "Browse…"}
+                        </button>
                       </div>
-                      <button className="btn" onClick={changeInstanceDirectory} disabled={instanceDirectoryBusy || !instanceDirectoryDraft.trim()}>
-                        {instanceDirectoryBusy ? "Moving instances..." : "Move instances to folder"}
-                      </button>
-                      <p className="setting-note">Existing instances move to this folder. Choose an empty folder and keep it available while using the launcher.</p>
                       {instanceDirectoryMessage && <p className="setting-note">{instanceDirectoryMessage}</p>}
                       <label>Simultaneous installs <span className="field-value">{st.downloadConcurrency}</span></label>
                       <input type="range" min={1} max={5} step={1} value={st.downloadConcurrency}
