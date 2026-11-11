@@ -535,6 +535,51 @@ fn install_legacy_client_profile(installer: &Path, dir: &Path) -> Result<Option<
 
 // ---------------------------------------------------------------- version json
 
+/// The running Windows version such as "10.0.19045", or "" when it can't be read
+/// (non-Windows, or `ver` failed). Looked up once per launcher run.
+fn os_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(query_os_version)
+}
+
+fn query_os_version() -> String {
+    #[cfg(windows)]
+    {
+        let Ok(out) = Command::new("cmd")
+            .args(["/C", "ver"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        else {
+            return String::new();
+        };
+        // "Microsoft Windows [Version 10.0.19045.1234]"
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.split("Version ")
+            .nth(1)
+            .and_then(|v| v.split(']').next())
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
+/// Checks a rule's `os.version` pattern (e.g. `^10\.`) against the running version.
+/// Mojang only uses simple anchored prefixes. Anything more complex, or an unknown
+/// version, counts as a match, which is the behaviour before this check existed.
+fn version_matches(pattern: &str, version: &str) -> bool {
+    if version.is_empty() {
+        return true;
+    }
+    let prefix = pattern.strip_prefix('^').unwrap_or(pattern).replace("\\.", ".");
+    if prefix.chars().any(|c| "()[]{}*+?$|\\".contains(c)) {
+        return true;
+    }
+    version.starts_with(&prefix)
+}
+
 fn rules_ok(rules: Option<&Value>) -> bool {
     let Some(arr) = rules.and_then(|r| r.as_array()) else {
         return true;
@@ -547,6 +592,13 @@ fn rules_ok(rules: Option<&Value>) -> bool {
             if let Some(n) = os["name"].as_str() {
                 if n != OS {
                     m = false;
+                }
+            }
+            if m {
+                if let Some(pattern) = os["version"].as_str() {
+                    if !version_matches(pattern, os_version()) {
+                        m = false;
+                    }
                 }
             }
             if os["arch"].as_str() == Some("x86") && !cfg!(target_arch = "x86") {
@@ -594,15 +646,32 @@ pub fn resolve(dir: &Path, id: &str) -> Result<Value> {
             out[k] = v.clone();
         }
     }
-    let mut seen = HashSet::new();
-    let libs: Vec<Value> = child["libraries"]
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut libs: Vec<Value> = Vec::new();
+    for l in child["libraries"]
         .as_array()
         .into_iter()
         .flatten()
         .chain(parent["libraries"].as_array().into_iter().flatten())
-        .filter(|l| rules_ok(l.get("rules")) && seen.insert(lib_key(l)))
-        .cloned()
-        .collect();
+    {
+        if !rules_ok(l.get("rules")) {
+            continue;
+        }
+        match index.get(&lib_key(l)) {
+            Some(&i) => {
+                // The same artifact can be listed twice: once as a plain entry and once
+                // with its `natives` mapping. Keep the entry that carries the natives so
+                // the native jar (e.g. lwjgl.dll) is still downloaded and extracted.
+                if libs[i].get("natives").is_none() && l.get("natives").is_some() {
+                    libs[i] = l.clone();
+                }
+            }
+            None => {
+                index.insert(lib_key(l), libs.len());
+                libs.push(l.clone());
+            }
+        }
+    }
     out["libraries"] = Value::Array(libs);
     for kind in ["game", "jvm"] {
         let mut a = parent["arguments"][kind]
@@ -702,6 +771,22 @@ fn collect_libs(v: &Value) -> Vec<LibFile> {
     out
 }
 
+/// File names that `extract_natives` would write for this jar.
+fn native_file_names(jar: &Path) -> Result<Vec<String>> {
+    let mut z = zip::ZipArchive::new(fs::File::open(jar)?)?;
+    let mut names = vec![];
+    for i in 0..z.len() {
+        let f = z.by_index(i)?;
+        if f.is_dir() || f.name().starts_with("META-INF") {
+            continue;
+        }
+        if let Some(n) = Path::new(f.name()).file_name() {
+            names.push(n.to_string_lossy().into_owned());
+        }
+    }
+    Ok(names)
+}
+
 fn extract_natives(jar: &Path, out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
     let mut z = zip::ZipArchive::new(fs::File::open(jar)?)?;
@@ -760,10 +845,27 @@ pub async fn install_deps(
         r?;
     }
 
-    // legacy natives
+    // natives: drop files left over from an older set (e.g. a previous LWJGL), then extract
     let natives_dir = dir.join("versions").join(id).join("natives");
-    for f in files.iter().filter(|f| f.native) {
-        extract_natives(&libs_dir.join(&f.path), &natives_dir)?;
+    let native_jars: Vec<PathBuf> = files
+        .iter()
+        .filter(|f| f.native)
+        .map(|f| libs_dir.join(&f.path))
+        .collect();
+    let mut wanted = HashSet::new();
+    for jar in &native_jars {
+        wanted.extend(native_file_names(jar)?);
+    }
+    if let Ok(entries) = fs::read_dir(&natives_dir) {
+        for entry in entries.flatten() {
+            if !wanted.contains(&entry.file_name().to_string_lossy().into_owned()) {
+                // a DLL still loaded by a running game can't be deleted; leave it alone
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    for jar in &native_jars {
+        extract_natives(jar, &natives_dir)?;
     }
 
     // assets
@@ -905,7 +1007,7 @@ fn java_path(path: &Path) -> String {
 mod launch_argument_tests {
     use super::{
         expand, expand_jvm_arg, forge_installer_urls, java_path, legacy_client_version, maven_path,
-        neoforge_version_prefix, resolve, sha1_file, OS,
+        neoforge_version_prefix, resolve, sha1_file, version_matches, OS,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1070,6 +1172,51 @@ mod launch_argument_tests {
         assert_eq!(libraries[0]["name"], "org.lwjgl:lwjgl-glfw:3.2.2");
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn os_version_rule_matches_only_the_listed_windows_version() {
+        assert!(version_matches("^10\\.", "10.0.19045"));
+        assert!(!version_matches("^10\\.", "6.1.7601"));
+        assert!(version_matches("^6\\.1", "6.1.7601"));
+        // unknown version or a pattern we don't parse: keep the old "matches" behaviour
+        assert!(version_matches("^10\\.", ""));
+        assert!(version_matches("^(10|11)\\.", "6.1.7601"));
+    }
+
+    #[test]
+    fn resolve_keeps_natives_entry_when_plain_duplicate_comes_first() {
+        let dir = std::env::temp_dir().join(format!("arca-natives-{}", uuid::Uuid::new_v4()));
+        let parent_dir = dir.join("versions").join("parent");
+        let child_dir = dir.join("versions").join("child");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let parent = json!({
+            "id": "parent",
+            "libraries": [
+                {
+                    "name": "org.lwjgl:lwjgl:3.2.2",
+                    "downloads": {"artifact": {"path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar", "url": "", "sha1": null}}
+                },
+                {
+                    "name": "org.lwjgl:lwjgl:3.2.2",
+                    "downloads": {
+                        "artifact": {"path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar", "url": "", "sha1": null},
+                        "classifiers": {"natives-windows": {"path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar", "url": "", "sha1": null}}
+                    },
+                    "natives": {"windows": "natives-windows"}
+                }
+            ]
+        });
+        let child = json!({"id": "child", "inheritsFrom": "parent", "libraries": []});
+        std::fs::write(parent_dir.join("parent.json"), serde_json::to_vec(&parent).unwrap()).unwrap();
+        std::fs::write(child_dir.join("child.json"), serde_json::to_vec(&child).unwrap()).unwrap();
+
+        let resolved = resolve(&dir, "child").unwrap();
+        let libraries = resolved["libraries"].as_array().unwrap();
+        assert_eq!(libraries.len(), 1);
+        assert!(libraries[0].get("natives").is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 pub struct LaunchOpts {
@@ -1196,7 +1343,7 @@ pub fn launch(
     
     // Detect Java version to filter incompatible arguments
     let java_major = crate::detect_java_major(java).ok();
-    let filtered_jvm: Vec<String> = jvm
+    let mut filtered_jvm: Vec<String> = jvm
         .into_iter()
         .filter(|arg| {
             // --sun-misc-unsafe-memory-access requires Java 17+
@@ -1223,6 +1370,14 @@ pub fn launch(
         })
         .collect();
     
+    // LWJGL loads its native libraries (lwjgl.dll, glfw.dll, ...) from java.library.path.
+    // Make sure it always points at the extracted natives, even if the version JSON
+    // does not declare it, otherwise the game fails with "Failed to locate library".
+    if !filtered_jvm.iter().any(|a| a.starts_with("-Djava.library.path=")) {
+        let natives = vars.get("natives_directory").cloned().unwrap_or_default();
+        filtered_jvm.insert(0, format!("-Djava.library.path={natives}"));
+    }
+
     let game: Vec<String> = match v["arguments"]["game"].as_array() {
         Some(a) => a.iter().flat_map(|x| expand(x, &vars)).collect(),
         None => v["minecraftArguments"]
@@ -1326,9 +1481,18 @@ pub fn launch(
             ),
         );
 
-        if code != Some(0) {
-            let report = find_crash_report(&inst2, launch_time);
-            let tail: Vec<String> = log_buf.lock().unwrap().iter().cloned().collect();
+        let report = find_crash_report(&inst2, launch_time);
+        let tail: Vec<String> = log_buf.lock().unwrap().iter().cloned().collect();
+        // A non-zero exit alone is not a crash: closing the game from Task Manager also
+        // ends the process with an error code. Count it as a crash only when Minecraft wrote
+        // a new crash report, or the JVM itself reported a fatal error.
+        let jvm_failed = tail.iter().any(|l| {
+            l.contains("Exception in thread")
+                || l.contains("Could not create the Java Virtual Machine")
+                || l.contains("Error occurred during initialization")
+        });
+        let looks_crashed = report.is_some() || (code.is_some_and(|c| c != 0) && jvm_failed);
+        if looks_crashed {
             let _ = app2.emit(
                 "game-crash",
                 serde_json::json!({
