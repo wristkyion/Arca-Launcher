@@ -59,6 +59,7 @@ const MAINTENANCE_DETAILS: Record<MaintenanceAction, { title: string; descriptio
   },
 };
 type CSSVars = CSSProperties & { [key: `--${string}`]: string | number };
+type DropdownPosition = { top: number; left: number; width: number; maxHeight: number };
 declare global {
   interface Window {
     __arcaShowStartupWizard?: () => void;
@@ -597,18 +598,62 @@ function AppInner() {
   const [addBusy, setAddBusy] = useState(false);
   const [addErr, setAddErr] = useState("");
   const [homeAccountPickerOpen, setHomeAccountPickerOpen] = useState(false);
+  const [launcherUpdatesOpen, setLauncherUpdatesOpen] = useState(false);
+  const instancePickerRef = useRef<HTMLButtonElement>(null);
+  const accountPickerRef = useRef<HTMLButtonElement>(null);
+  const [instanceMenuPosition, setInstanceMenuPosition] = useState<DropdownPosition | null>(null);
+  const [accountMenuPosition, setAccountMenuPosition] = useState<DropdownPosition | null>(null);
 
   // instances
   const [instances, setInstances] = useState<Instance[]>([]);
   const [instId, setInstId] = useState("");
   const [instanceSearch, setInstanceSearch] = useState("");
   const [activeBackground, setActiveBackground] = useState("");
+  const [outgoingBackground, setOutgoingBackground] = useState("");
+  const activeBackgroundRef = useRef("");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuClosing, setMenuClosing] = useState(false);
-  const closeMenu = () => {
-    setMenuClosing(true);
-    setTimeout(() => { setMenuOpen(false); setMenuClosing(false); }, 120);
+  const dropdownPosition = (anchor: HTMLElement, preferredWidth: number): DropdownPosition => {
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(preferredWidth, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+    const below = window.innerHeight - rect.bottom - 12;
+    const above = rect.top - 12;
+    const openBelow = below >= 160 || below >= above;
+    const maxHeight = Math.max(120, Math.min(320, openBelow ? below - 6 : above - 6));
+    const top = openBelow ? rect.bottom + 6 : Math.max(12, rect.top - maxHeight - 6);
+    return { top, left, width, maxHeight };
   };
+  const openInstancePicker = () => {
+    if (menuOpen) {
+      closeMenu();
+      return;
+    }
+    if (instancePickerRef.current) setInstanceMenuPosition(dropdownPosition(instancePickerRef.current, 320));
+    setMenuOpen(true);
+    setHomeAccountPickerOpen(false);
+  };
+  const openAccountPicker = () => {
+    if (homeAccountPickerOpen) {
+      setHomeAccountPickerOpen(false);
+      return;
+    }
+    if (accountPickerRef.current) setAccountMenuPosition(dropdownPosition(accountPickerRef.current, 280));
+    setHomeAccountPickerOpen(true);
+    setMenuOpen(false);
+  };
+  useEffect(() => {
+    const reposition = () => {
+      if (menuOpen && instancePickerRef.current) setInstanceMenuPosition(dropdownPosition(instancePickerRef.current, 320));
+      if (homeAccountPickerOpen && accountPickerRef.current) setAccountMenuPosition(dropdownPosition(accountPickerRef.current, 280));
+    };
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [menuOpen, homeAccountPickerOpen]);
+  const closeMenu = () => setMenuOpen(false);
 
   // download wizard
   const [tab, setTab] = useState<"download" | "instances">("download");
@@ -1058,20 +1103,46 @@ function AppInner() {
   const focusedSkin = focusedAccount ? skins[focusedAccount.id] ?? null : null;
   const effRam = st.ramAuto ? autoRam(sysRam, inst?.loader ?? "vanilla") : ram;
 
+  const setPlayBackground = (background: string) => {
+    if (background === activeBackgroundRef.current) return;
+    setOutgoingBackground(activeBackgroundRef.current);
+    activeBackgroundRef.current = background;
+    setActiveBackground(background);
+  };
+
   useEffect(() => {
-    if (!inst?.background) {
-      setActiveBackground("");
+    if (!outgoingBackground) return;
+    const timeout = window.setTimeout(() => setOutgoingBackground(""), 700);
+    return () => window.clearTimeout(timeout);
+  }, [outgoingBackground]);
+
+  useEffect(() => {
+    if (!inst) {
+      setPlayBackground("");
+      return;
+    }
+    if (!inst.background) {
+      setPlayBackground("");
       return;
     }
     let active = true;
-    invoke<string | null>("load_instance_background", { id: inst.id })
-      .then((background) => { if (active) setActiveBackground(background ?? ""); })
-      .catch((e) => {
+    const loadBackground = async () => {
+      try {
+        const background = await invoke<string | null>("load_instance_background", { id: inst.id });
+        if (!active) return;
+        if (background) {
+          const image = new Image();
+          image.src = background;
+          await image.decode();
+        }
+        if (active) setPlayBackground(background ?? "");
+      } catch (e) {
         if (active) {
-          setActiveBackground("");
           add(`Could not load instance background: ${e}`);
         }
-      });
+      }
+    };
+    void loadBackground();
     return () => { active = false; };
   }, [inst?.id, inst?.background]);
 
@@ -1414,7 +1485,14 @@ function AppInner() {
       setContentInst((current) => current?.id === editedId
         ? updated.find((instance) => instance.id === editedId) ?? current
         : current);
-      if (editedId === instId) setActiveBackground(editBg);
+      if (editedId === instId) {
+        if (editBg) {
+          const image = new Image();
+          image.src = editBg;
+          await image.decode();
+        }
+        setPlayBackground(editBg);
+      }
       setEditId(null);
     } catch (e) { add(`ERROR: ${e}`); setPage("console"); }
   };
@@ -1714,7 +1792,7 @@ function AppInner() {
   }
 
   return (
-    <div className="shell" style={{ "--shell-height": `${winH / (st.uiScale / 100)}px` } as CSSVars}>
+    <div className={"shell" + (page === "play" ? " play-mode" : "")} style={{ "--shell-height": `${winH / (st.uiScale / 100)}px` } as CSSVars}>
       {firstRunOpen && createPortal(
         <div className={"onboarding-overlay" + (firstRunClosing ? " is-closing" : "")}>
           <section className="onboarding-card" aria-labelledby="onboarding-title">
@@ -1877,11 +1955,13 @@ function AppInner() {
           {nav.map(([p, ic, label]) => (
             <button key={p} className={"nav" + (page === p ? " on" : "")} onClick={() => setPage(p)} title={label}>
               <Icon n={ic} />
+              <span className="nav-label">{label}</span>
             </button>
           ))}
           <div className="grow" />
           <button className={"nav" + (page === "settings" ? " on" : "")} onClick={() => setPage("settings")} title="Settings">
             <Icon n="gear" />
+            <span className="nav-label">Settings</span>
           </button>
         </nav>
 
@@ -1889,40 +1969,65 @@ function AppInner() {
           <div key={page === "mods" ? "__mods__" : page} className={"pagewrap " + (fade === "out" ? "out" : "in") + (page === "mods" ? " hidden" : "")}>
           {page === "play" && (
             <div className="play-screen">
-              <div className="top play-feature-row">
-                <section className={"hero" + (activeBackground ? " has-bg" : "")}>
-                  {activeBackground && <BgPreview className="hero-background" src={activeBackground} />}
-                  <div className="pickwrap">
-                    <button className="instpick" onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}>
-                      {inst ? (<><InstIcon inst={inst} size={22} /><span>{inst.name}</span></>) : <span>No instance</span>}
-                      <span className="chev">▾</span>
-                    </button>
-                    {menuOpen && (<>
-                      <div className="scrim" onClick={closeMenu} />
-                      <div className={"menu" + (menuClosing ? " closing" : "")}>
-                        {instances.map((i, index) => (
-                          <button key={i.id} className={("mitem" + (i.id === instId ? " on" : "") + " animate-stagger")}
-                            style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
-                            onClick={() => { setInstId(i.id); closeMenu(); }}>
-                            <InstIcon inst={i} size={30} />
-                            <div><b>{i.name}</b><small>{cap(i.loader)} · {i.mc}</small></div>
-                          </button>
-                        ))}
-                        <button className="mitem add" onClick={() => { closeMenu(); newInstance(); }}>＋ New instance</button>
-                      </div>
-                    </>)}
-                  </div>
-
-                  <div className="herohead">
+              <div
+                className={"top play-feature-row" + (activeBackground || outgoingBackground ? " has-instance-background" : "")}
+              >
+                {outgoingBackground && (
+                  <div
+                    className={"play-instance-background" + (activeBackground ? "" : " fading-out")}
+                    style={{ backgroundImage: `linear-gradient(90deg, rgba(12,10,19,.82), rgba(12,10,19,.58) 46%, rgba(12,10,19,.22)), url("${outgoingBackground}")` }}
+                    aria-hidden="true"
+                  />
+                )}
+                {activeBackground && (
+                  <div
+                    key={activeBackground}
+                    className="play-instance-background fading-in"
+                    style={{ backgroundImage: `linear-gradient(90deg, rgba(12,10,19,.82), rgba(12,10,19,.58) 46%, rgba(12,10,19,.22)), url("${activeBackground}")` }}
+                    aria-hidden="true"
+                  />
+                )}
+                <section className="hero play-hero">
+                  <span className="play-kicker play-welcome">
+                    Welcome back,{current && (
+                      <span className="play-welcome-user">
+                        <Avatar acc={current} skin={skins[current.id] ?? null} />
+                        {shownName}!
+                      </span>
+                    )}
+                  </span>
+                  <button
+                    ref={instancePickerRef}
+                    className="herohead instance-choice"
+                    type="button"
+                    aria-label={inst ? `Select instance, currently ${inst.name}` : "Select instance"}
+                    aria-expanded={menuOpen}
+                    aria-haspopup="listbox"
+                    onClick={openInstancePicker}
+                  >
                     {inst && <InstIcon inst={inst} size={72} />}
                     <div>
                       <h1>{inst ? inst.name : "No instance yet"}</h1>
                       {inst && <span className="tag">Minecraft {inst.mc} · {cap(inst.loader)}</span>}
                     </div>
-                  </div>
-                  <p>{inst ? (inst.description || BLURB[inst.loader]) : "Download a Minecraft version to get started."}</p>
+                    <span className="instance-choice-chevron" aria-hidden="true">▾</span>
+                  </button>
+                  <p className="play-description">{inst ? (inst.description || BLURB[inst.loader]) : "Download a Minecraft version to get started."}</p>
 
                   <div className="launchrow">
+                    <button
+                      className="btn play-updates-button"
+                      type="button"
+                      aria-label="What's new"
+                      title="What's new"
+                      onClick={() => setLauncherUpdatesOpen(true)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M7 3.75h7l4.25 4.3v11.2a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-14.5a1 1 0 0 1 1-1Z" />
+                        <path d="M14 4v4.5h4.5M9 12h6M9 15.5h6" />
+                        <path d="m18.5 13 .65 1.35 1.35.65-1.35.65-.65 1.35-.65-1.35-1.35-.65 1.35-.65.65-1.35Z" />
+                      </svg>
+                    </button>
                     <button className={"launch" + (gameRunning ? " is-running" : "")} disabled={busy || gameRunning}
                       onClick={!current ? () => setPage("account") : !inst ? newInstance : play}>
                       <b>{gameRunning ? "RUNNING" : busy ? "WORKING..." : !current ? "ADD AN ACCOUNT" : !inst ? "NEW INSTANCE" : `LAUNCH ${inst.mc}`}</b>
@@ -1934,86 +2039,39 @@ function AppInner() {
                 </section>
 
                 <div className="rightcol">
-                <aside
-                  className={"player" + (current?.custom_background ? " has-profile-background" : "")}
-                  style={current?.custom_background ? {
-                    backgroundImage: `linear-gradient(180deg, rgba(10,9,16,.48), rgba(10,9,16,.78) 58%, rgba(10,9,16,.94)), url("${current.custom_background}")`,
-                  } : undefined}
-                >
-                  <div className="play-profile-heading">
-                    <span className="eyebrow">PLAYER PROFILE</span>
-                    <span className={"play-profile-state" + (current ? " ready" : "")}><i />{current ? "Ready" : "Account needed"}</span>
+                <aside className="player">
+                  <div
+                    className={"play-profile-heading" + (current?.custom_background ? " has-account-banner" : "")}
+                    style={current?.custom_background ? {
+                      backgroundImage: `linear-gradient(90deg, rgba(18,16,27,.88), rgba(18,16,27,.52)), url("${current.custom_background}")`,
+                    } : undefined}
+                  >
+                    <span className="play-profile-avatar">{current ? <Avatar acc={current} skin={skins[current.id] ?? null} /> : <Icon n="user" />}</span>
+                    <span className="play-profile-copy">
+                      <b>{shownName}</b>
+                      <small><i />{current ? "Ready to play" : "Account needed"}</small>
+                    </span>
+                    <div className="home-account-wrap">
+                      <button
+                        ref={accountPickerRef}
+                        className="btn purple home-account-trigger"
+                        aria-expanded={homeAccountPickerOpen}
+                        aria-haspopup="listbox"
+                        aria-label="Switch account"
+                        onClick={openAccountPicker}
+                      >
+                        <Icon n="user" /><span className="chev">▾</span>
+                      </button>
+                    </div>
                   </div>
                   {current && skins[current.id]?.data ? (
                     <SkinModel data={skins[current.id]!.data!} slim={skins[current.id]!.slim} className="home-player-model" />
                   ) : current?.kind === "offline" && !skinFail ? (
                     <img className="skin" src={skin} alt="" onError={() => setSkinFail(true)} />
-                  ) : <div className="skin ph" />}
-                  <div className="pname">{shownName}</div>
-                  <div className="home-account-wrap">
-                    <button
-                      className="btn purple home-account-trigger"
-                      aria-expanded={homeAccountPickerOpen}
-                      aria-haspopup="listbox"
-                      onClick={() => setHomeAccountPickerOpen((open) => !open)}
-                    >
-                      Switch Account <span className="chev">▾</span>
-                    </button>
-                    {homeAccountPickerOpen && (<>
-                      <div className="scrim" onClick={() => setHomeAccountPickerOpen(false)} />
-                      <div className="menu home-account-menu" role="listbox" aria-label="Switch account">
-                        {accounts.length === 0
-                          ? <p className="home-account-empty">No saved accounts. Add one from Accounts.</p>
-                          : accounts.map((account, index) => (
-                            <button
-                              key={account.id}
-                              className={("mitem home-account-option" + (account.id === selected ? " on" : "") + " animate-stagger")}
-                              style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
-                              role="option"
-                              aria-selected={account.id === selected}
-                              onClick={() => selectFromHome(account.id)}
-                            >
-                              <Avatar acc={account} skin={skins[account.id] ?? null} />
-                              <span className="home-account-option-info">
-                                <b>{account.username}</b>
-                                <small>{KIND_LABEL[account.kind]}</small>
-                              </span>
-                              {account.id === selected && <span className="home-account-current">Current</span>}
-                            </button>
-                          ))}
-                      </div>
-                    </>)}
-                  </div>
+                  ) : null}
                 </aside>
-                <section className="changelog" aria-label="Launcher changelog">
-                <header className="play-changelog-heading">
-                  <div><span className="eyebrow">WHAT'S NEW</span><h2>Launcher updates</h2></div>
-                  <span className="play-changelog-count">{CHANGELOG.length} releases</span>
-                </header>
-                <div className="play-changelog-list" aria-label="Recent launcher updates">
-                  {CHANGELOG.map((c) => (
-                    <article key={c.v} className="cl">
-                      <div className="clhead"><span className="clv">v{c.v}</span><b>{c.title}</b></div>
-                      {"sections" in c
-                        ? c.sections.map((section) => (
-                          <div key={section.title}>
-                            <b className="cl-section-title">{section.title}</b>
-                            <ul>{section.items.map((it) => <li key={it}>{it}</li>)}</ul>
-                          </div>
-                        ))
-                        : <ul>{c.items.map((it) => <li key={it}>{it}</li>)}
-                      </ul>}
-                    </article>
-                  ))}
                 </div>
-                </section>
-                </div>
-              </div>
-              <section className="minecraft-news" aria-label="Minecraft news">
-                <header className="play-news-heading">
-                  <div><span className="eyebrow">FROM MINECRAFT.NET</span><h2>Latest Minecraft news</h2></div>
-                  <span className="play-news-count">{minecraftNews.length ? `${minecraftNews.length} stories` : "Official news feed"}</span>
-                </header>
+                <section className="minecraft-news" aria-label="Minecraft news">
                 {minecraftNewsError && (
                   <div className="play-news-status" role="status">
                     <span>{minecraftNewsError}</span>
@@ -2027,7 +2085,7 @@ function AppInner() {
                   {minecraftNewsLoading && minecraftNews.length === 0
                     ? <div className="play-news-track is-loading">{Array.from({ length: 4 }, (_, index) => <div key={index} className="play-news-skeleton" aria-hidden="true" />)}</div>
                     : minecraftNews.length > 0 && (
-                      <div className="play-news-track" style={{ "--news-slide-duration": `${Math.max(45, minecraftNews.length * 5)}s` } as CSSVars}>
+                      <div className="play-news-track" style={{ "--news-slide-duration": `${Math.max(90, minecraftNews.length * 12)}s` } as CSSVars}>
                         {[false, true].map((duplicate) => (
                           <div key={duplicate ? "clone" : "news"} className="play-news-group" aria-hidden={duplicate || undefined}>
                             {minecraftNews.map((entry, index) => duplicate ? (
@@ -2048,7 +2106,6 @@ function AppInner() {
                                   <span className="play-news-meta">
                                     <span className="play-news-labels">
                                       <span className="play-news-tag">{entry.category || "Minecraft"}</span>
-                                      {entry.tag && <span className="play-news-type">{entry.tag}</span>}
                                     </span>
                                     {entry.date && <time dateTime={entry.date}>{entry.date}</time>}
                                   </span>
@@ -2072,7 +2129,6 @@ function AppInner() {
                                   <span className="play-news-meta">
                                     <span className="play-news-labels">
                                       <span className="play-news-tag">{entry.category || "Minecraft"}</span>
-                                      {entry.tag && <span className="play-news-type">{entry.tag}</span>}
                                     </span>
                                     {entry.date && <time dateTime={entry.date}>{entry.date}</time>}
                                   </span>
@@ -2090,7 +2146,86 @@ function AppInner() {
                     <p className="play-news-empty">No recent Minecraft news is available right now.</p>
                   )}
                 </div>
-              </section>
+                </section>
+              </div>
+              {launcherUpdatesOpen && (
+                <Modal title="Launcher updates" onClose={() => setLauncherUpdatesOpen(false)} wide overlayClassName="launcher-updates-modal">
+                  <div className="launcher-updates-list">
+                    {CHANGELOG.map((c) => (
+                      <article key={c.v} className="cl">
+                        <div className="clhead"><span className="clv">v{c.v}</span><b>{c.title}</b></div>
+                        {"sections" in c
+                          ? c.sections.map((section) => (
+                            <div key={section.title}>
+                              <b className="cl-section-title">{section.title}</b>
+                              <ul>{section.items.map((it) => <li key={it}>{it}</li>)}</ul>
+                            </div>
+                          ))
+                          : <ul>{c.items.map((it) => <li key={it}>{it}</li>)}</ul>}
+                      </article>
+                    ))}
+                  </div>
+                </Modal>
+              )}
+              {menuOpen && instanceMenuPosition && createPortal(
+                <>
+                  <div className="play-dropdown-scrim" onMouseDown={closeMenu} />
+                  <div
+                    className="menu play-portal-menu"
+                    role="listbox"
+                    aria-label="Select instance"
+                    style={{ position: "fixed", ...instanceMenuPosition }}
+                  >
+                    {instances.map((instance, index) => (
+                      <button
+                        key={instance.id}
+                        className={"mitem" + (instance.id === instId ? " on" : "") + " animate-stagger"}
+                        style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
+                        role="option"
+                        aria-selected={instance.id === instId}
+                        onClick={() => { setInstId(instance.id); closeMenu(); }}
+                      >
+                        <InstIcon inst={instance} size={30} />
+                        <div><b>{instance.name}</b><small>{cap(instance.loader)} · {instance.mc}</small></div>
+                      </button>
+                    ))}
+                    <button className="mitem add" onClick={() => { closeMenu(); newInstance(); }}>＋ New instance</button>
+                  </div>
+                </>,
+                getPortalRoot(),
+              )}
+              {homeAccountPickerOpen && accountMenuPosition && createPortal(
+                <>
+                  <div className="play-dropdown-scrim" onMouseDown={() => setHomeAccountPickerOpen(false)} />
+                  <div
+                    className="menu play-portal-menu home-account-menu"
+                    role="listbox"
+                    aria-label="Switch account"
+                    style={{ position: "fixed", ...accountMenuPosition }}
+                  >
+                    {accounts.length === 0
+                      ? <p className="home-account-empty">No saved accounts. Add one from Accounts.</p>
+                      : accounts.map((account, index) => (
+                        <button
+                          key={account.id}
+                          className={"mitem home-account-option" + (account.id === selected ? " on" : "") + " animate-stagger"}
+                          style={{ animationDelay: `${Math.min(index, 20) * 0.03}s` }}
+                          role="option"
+                          aria-selected={account.id === selected}
+                          onClick={() => selectFromHome(account.id)}
+                        >
+                          <Avatar acc={account} skin={skins[account.id] ?? null} />
+                          <span className="home-account-option-info">
+                            <b>{account.username}</b>
+                            <small>{KIND_LABEL[account.kind]}</small>
+                          </span>
+                          {account.id === selected && <span className="home-account-current">Current</span>}
+                        </button>
+                      ))}
+                  </div>
+                </>,
+                getPortalRoot(),
+              )}
             </div>
           )}
 

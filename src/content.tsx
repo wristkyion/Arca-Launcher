@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Inst } from "./mods";
@@ -47,6 +48,7 @@ const ACTION_ICONS = {
   close: new URL("../assets/icons/close.svg", import.meta.url).href,
   instance: new URL("../assets/icons/resourcepack.svg", import.meta.url).href,
 };
+const getPortalRoot = () => document.getElementById("portals") ?? document.body;
 
 const INSTANCE_ICONS: Record<string, string> = {
   vanilla: new URL("../assets/modifted/vanilla.jpg", import.meta.url).href,
@@ -92,8 +94,15 @@ export default function ContentPage({
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
   const [worlds, setWorlds] = useState<World[]>([]);
   const [playtime, setPlaytime] = useState<Playtime>({ total_seconds: 0, days: [] });
+  const [selectedScreenshot, setSelectedScreenshot] = useState<Screenshot | null>(null);
   const [selectedWorld, setSelectedWorld] = useState("");
   const [nbtText, setNbtText] = useState("");
+  const [originalNbtText, setOriginalNbtText] = useState("");
+  const [nbtLoading, setNbtLoading] = useState(false);
+  const [nbtSaving, setNbtSaving] = useState(false);
+  const [nbtError, setNbtError] = useState("");
+  const [nbtSaved, setNbtSaved] = useState(false);
+  const [chartRange, setChartRange] = useState<7 | 30 | 90>(30);
   const [loading, setLoading] = useState(false);
   const [loadingOverlayVisible, setLoadingOverlayVisible] = useState(false);
   const [loadingOverlayExiting, setLoadingOverlayExiting] = useState(false);
@@ -104,10 +113,37 @@ export default function ContentPage({
   const [instanceBackground, setInstanceBackground] = useState("");
   const [exporting, setExporting] = useState(false);
   const loadRequest = useRef(0);
+  const nbtLoadRequest = useRef(0);
   const selectionKey = `${inst?.id ?? "none"}:${kind}`;
   const activeSelection = useRef(selectionKey);
   activeSelection.current = selectionKey;
   const selectedKind = KINDS.find((item) => item.key === kind)!;
+  const chartData = useMemo(() => {
+    const secondsByDate = new Map(playtime.days.map((day) => [day.date, day.seconds]));
+    const today = new Date();
+    const endOfToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+    return Array.from({ length: chartRange }, (_, index) => {
+      const date = new Date(endOfToday - (chartRange - index - 1) * 86400000).toISOString().slice(0, 10);
+      return { date, seconds: secondsByDate.get(date) ?? 0 };
+    });
+  }, [chartRange, playtime.days]);
+  const chartTotal = chartData.reduce((total, day) => total + day.seconds, 0);
+  const chartActiveDays = chartData.filter((day) => day.seconds > 0).length;
+  const chartBestDay = chartData.reduce((best, day) => day.seconds > best.seconds ? day : best, { date: "", seconds: 0 });
+  const chartPeakSeconds = Math.max(...chartData.map((day) => day.seconds), 0);
+  const chartStepSeconds = chartPeakSeconds <= 3600 ? 900 : chartPeakSeconds <= 7200 ? 1800 : chartPeakSeconds <= 14400 ? 3600 : chartPeakSeconds <= 28800 ? 7200 : 14400;
+  const chartMaxSeconds = Math.max(chartStepSeconds * 4, Math.ceil(chartPeakSeconds / chartStepSeconds) * chartStepSeconds);
+  const chartPlot = { left: 52, top: 16, width: 930, height: 174 };
+  const chartBarGap = chartRange === 90 ? 2 : 4;
+  const chartBarWidth = (chartPlot.width - (chartRange - 1) * chartBarGap) / chartRange;
+  const formatDate = (value: string) => new Date(`${value}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  const formatChartAxis = (seconds: number) => {
+    if (seconds === 0) return "0";
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.round((seconds % 3600) / 60);
+    return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+  };
 
   useEffect(() => {
     let active = true;
@@ -134,11 +170,23 @@ export default function ContentPage({
     setErr("");
     if (kind === "screenshots" || kind === "worlds" || kind === "playtime") {
       try {
-        if (kind === "screenshots") setScreenshots(await invoke<Screenshot[]>("list_instance_screenshots", { instance: inst.id }));
-        if (kind === "worlds") setWorlds(await invoke<World[]>("list_instance_worlds", { instance: inst.id }));
-        if (kind === "playtime") setPlaytime(await invoke<Playtime>("get_instance_playtime", { instance: inst.id }));
-      } catch (e) { setErr(String(e)); }
-      finally { setLoading(false); }
+        if (kind === "screenshots") {
+          const next = await invoke<Screenshot[]>("list_instance_screenshots", { instance: inst.id });
+          if (request === loadRequest.current && activeSelection.current === requestSelection) setScreenshots(next);
+        }
+        if (kind === "worlds") {
+          const next = await invoke<World[]>("list_instance_worlds", { instance: inst.id });
+          if (request === loadRequest.current && activeSelection.current === requestSelection) setWorlds(next);
+        }
+        if (kind === "playtime") {
+          const next = await invoke<Playtime>("get_instance_playtime", { instance: inst.id });
+          if (request === loadRequest.current && activeSelection.current === requestSelection) setPlaytime(next);
+        }
+      } catch (e) {
+        if (request === loadRequest.current && activeSelection.current === requestSelection) setErr(String(e));
+      } finally {
+        if (request === loadRequest.current && activeSelection.current === requestSelection) setLoading(false);
+      }
       return;
     }
     if (clearItems) setItems([]);
@@ -173,6 +221,10 @@ export default function ContentPage({
 
   const selectKind = (nextKind: Kind) => {
     if (nextKind === kind) return;
+    if (selectedWorld && nbtText !== originalNbtText && !window.confirm("Discard your unsaved NBT changes?")) return;
+    nbtLoadRequest.current += 1;
+    setSelectedWorld("");
+    setSelectedScreenshot(null);
     activeSelection.current = `${inst?.id ?? "none"}:${nextKind}`;
     setItems([]);
     setLoading(true);
@@ -184,15 +236,21 @@ export default function ContentPage({
     const text = `${item.name} ${item.file_name} ${item.description} ${item.source}`.toLowerCase();
     return text.includes(query.trim().toLowerCase());
   }), [items, query, showDisabled]);
+  const filteredScreenshots = useMemo(() => screenshots.filter((shot) => shot.name.toLowerCase().includes(query.trim().toLowerCase())), [screenshots, query]);
+  const filteredWorlds = useMemo(() => worlds.filter((world) => world.name.toLowerCase().includes(query.trim().toLowerCase())), [worlds, query]);
   const enabledCount = items.filter((item) => item.enabled).length;
+  const countForKind = (key: Kind) => key === "screenshots" ? screenshots.length : key === "worlds" ? worlds.length : key === "playtime" ? playtime.days.length : items.length;
+  const isFeatureKind = kind === "screenshots" || kind === "worlds" || kind === "playtime";
   const busyOn = (file: string, value: boolean) => setBusy((current) => ({ ...current, [file]: value }));
 
   const toggle = async (item: Item) => {
     if (!inst) return;
     busyOn(item.file_name, true);
     try {
-      await invoke("toggle_content", { req: { instance: inst.id, kind, file_name: item.file_name, enable: !item.enabled } });
-      await load();
+      const fileName = await invoke<string>("toggle_content", { req: { instance: inst.id, kind, file_name: item.file_name, enable: !item.enabled } });
+      setItems((current) => current.map((entry) => entry.file_name === item.file_name
+        ? { ...entry, file_name: fileName, enabled: !item.enabled }
+        : entry));
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -218,16 +276,65 @@ export default function ContentPage({
 
   const openNbt = async (world: string) => {
     if (!inst) return;
+    const request = ++nbtLoadRequest.current;
     setSelectedWorld(world);
-    try { setNbtText(await invoke<string>("read_world_nbt", { instance: inst.id, world })); }
-    catch (e) { setErr(String(e)); }
+    setNbtText("");
+    setOriginalNbtText("");
+    setNbtError("");
+    setNbtSaved(false);
+    setNbtLoading(true);
+    try {
+      const text = await invoke<string>("read_world_nbt", { instance: inst.id, world });
+      if (request === nbtLoadRequest.current) {
+        setNbtText(text);
+        setOriginalNbtText(text);
+      }
+    } catch (e) {
+      if (request === nbtLoadRequest.current) setNbtError(String(e));
+    } finally {
+      if (request === nbtLoadRequest.current) setNbtLoading(false);
+    }
   };
   const saveNbt = async () => {
     if (!inst || !selectedWorld) return;
-    try { await invoke("write_world_nbt", { instance: inst.id, world: selectedWorld, json: nbtText }); setErr(""); }
-    catch (e) { setErr(String(e)); }
+    try {
+      JSON.parse(nbtText);
+    } catch (e) {
+      setNbtSaved(false);
+      setNbtError(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    setNbtSaving(true);
+    setNbtError("");
+    setNbtSaved(false);
+    try {
+      await invoke("write_world_nbt", { instance: inst.id, world: selectedWorld, json: nbtText });
+      setOriginalNbtText(nbtText);
+      setNbtSaved(true);
+    } catch (e) {
+      setNbtError(String(e));
+    } finally {
+      setNbtSaving(false);
+    }
   };
+  const closeNbt = () => {
+    if (nbtText !== originalNbtText && !window.confirm("Discard your unsaved NBT changes?")) return;
+    nbtLoadRequest.current += 1;
+    setSelectedWorld("");
+  };
+  const closeScreenshot = () => setSelectedScreenshot(null);
   const formatDuration = (seconds: number) => `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+
+  useEffect(() => {
+    if (!selectedWorld && !selectedScreenshot) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (selectedWorld) closeNbt();
+      else closeScreenshot();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedWorld, selectedScreenshot, nbtText, originalNbtText]);
 
   return (
     <section className="library-workspace">
@@ -239,19 +346,19 @@ export default function ContentPage({
               <button key={tab.key} role="tab" aria-selected={kind === tab.key} className={kind === tab.key ? "on" : ""} onClick={() => selectKind(tab.key)}>
                 <img className={`library-type-icon ${tab.key}`} src={CONTENT_ICONS[tab.key]} alt="" />
                 <span>{tab.label}</span>
-                {kind === tab.key && <small>{items.length}</small>}
+                {kind === tab.key && <small>{countForKind(tab.key)}</small>}
               </button>
             ))}
           </nav>
         </div>
-        <div className="library-side-section">
+        {kind !== "playtime" && <div className="library-side-section">
           <span className="library-side-label">SEARCH</span>
           <div className="library-search-wrap">
             <img className="library-search-icon" src={ACTION_ICONS.search} alt="" />
             <input aria-label={`Search ${selectedKind.label}`} placeholder={`Search ${selectedKind.label.toLowerCase()}...`} value={query} onChange={(event) => setQuery(event.target.value)} />
             {query && <button className="mini library-clear-search" onClick={() => setQuery("")} aria-label="Clear search"><img src={ACTION_ICONS.close} alt="" /></button>}
           </div>
-        </div>
+        </div>}
       </aside>
       <main className="library-main">
         <div className="library-sticky-header">
@@ -301,19 +408,27 @@ export default function ContentPage({
               </div>
             </div>
           )}
-          <div className="library-list-heading">
-            <div><b>{selectedKind.label}</b><span>{enabledCount} enabled · {items.length - enabledCount} disabled</span></div>
+          <div className={`library-list-heading${isFeatureKind ? " library-feature-heading" : ""}`}>
+            <div>
+              <b>{selectedKind.label}</b>
+              <span>
+                {kind === "screenshots" ? `${filteredScreenshots.length}${query ? ` of ${screenshots.length}` : ""} ${filteredScreenshots.length === 1 ? "screenshot" : "screenshots"}` :
+                  kind === "worlds" ? `${filteredWorlds.length}${query ? ` of ${worlds.length}` : ""} ${filteredWorlds.length === 1 ? "world" : "worlds"}` :
+                    kind === "playtime" ? `${playtime.days.length} ${playtime.days.length === 1 ? "day" : "days"} tracked` :
+                      `${enabledCount} enabled · ${items.length - enabledCount} disabled`}
+              </span>
+            </div>
             <div className="library-list-actions">
-              <label className="library-toggle-disabled">
-                <input type="checkbox" checked={showDisabled} onChange={(event) => setShowDisabled(event.target.checked)} />
-                <span className="library-checkbox" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="m2 6 2.5 2.5L10 3" /></svg></span>
-                <span>Show disabled</span>
-              </label>
+              {!isFeatureKind && <label className="library-toggle-disabled">
+                  <input type="checkbox" checked={showDisabled} onChange={(event) => setShowDisabled(event.target.checked)} />
+                  <span className="library-checkbox" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="m2 6 2.5 2.5L10 3" /></svg></span>
+                  <span>Show disabled</span>
+                </label>}
               <button
                 className={`library-icon-action library-icon-action-expand library-list-refresh${loading ? " is-refreshing" : ""}`}
                 onClick={() => void load()}
                 disabled={loading}
-                aria-label={loading ? "Refreshing installed content" : "Refresh installed content"}
+                aria-label={loading ? `Refreshing ${selectedKind.label.toLowerCase()}` : `Refresh ${selectedKind.label.toLowerCase()}`}
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M13.2 6A5.5 5.5 0 0 0 3 4.4L1.8 5.7M1.8 2.8v2.9h2.9M2.8 10a5.5 5.5 0 0 0 10.2 1.6l1.2-1.3m0 2.9v-2.9h-2.9" />
@@ -340,13 +455,133 @@ export default function ContentPage({
           </div>
         )}
         {!loading && !err && kind === "screenshots" && screenshots.length === 0 && (
-          <div className="library-empty"><h3>No screenshots yet</h3><p>Screenshots taken in Minecraft will appear here.</p></div>
+          <div className="library-empty"><div className="feature-empty-mark">01</div><h3>No screenshots yet</h3><p>Screenshots captured in Minecraft for this instance will appear here.</p></div>
         )}
-        {!loading && kind === "screenshots" && screenshots.length > 0 && <div className="library-grid feature-grid">{screenshots.map((shot) => <article className="library-card" key={shot.name}><img className="library-artwork screenshot-artwork" src={shot.data_url} alt={shot.name} /><div className="library-card-content"><b>{shot.name}</b><a className="mini" href={shot.data_url} download={shot.name}>Save screenshot</a></div></article>)}</div>}
-        {!loading && !err && kind === "worlds" && worlds.length === 0 && <div className="library-empty"><h3>No worlds yet</h3><p>Worlds saved in this instance will appear here.</p></div>}
-        {!loading && kind === "worlds" && worlds.length > 0 && <div className="library-grid feature-grid">{worlds.map((world) => <article className="library-card" key={world.name}><img className="library-artwork world-artwork" src={world.icon || CONTENT_ICONS.worlds} alt="" /><div className="library-card-content"><b>{world.name}</b><button className="mini" onClick={() => void openNbt(world.name)}>Edit world NBT</button></div></article>)}</div>}
-        {selectedWorld && kind === "worlds" && <div className="app-modal-backdrop"><div className="app-modal-card wide world-nbt-modal"><header className="app-modal-header"><h3>Edit {selectedWorld} NBT</h3><button className="mini" onClick={() => setSelectedWorld("")}>Close</button></header><p>Advanced editor: changes directly update this world’s level.dat. An original backup is kept beside it.</p><textarea value={nbtText} onChange={(e) => setNbtText(e.target.value)} spellCheck={false} /><button className="mini" onClick={() => void saveNbt()}>Save NBT</button></div></div>}
-        {kind === "playtime" && <div className="playtime-panel"><h3>Total playtime</h3><strong>{formatDuration(playtime.total_seconds)}</strong><h3>Daily playtime</h3>{playtime.days.length ? playtime.days.map((day) => <div className="playtime-day" key={day.date}><span>{day.date}</span><b>{formatDuration(day.seconds)}</b></div>) : <p>No playtime recorded yet.</p>}</div>}
+        {!loading && !err && kind === "screenshots" && screenshots.length > 0 && filteredScreenshots.length === 0 && (
+          <div className="library-empty library-empty-small"><h3>No matching screenshots</h3><p>Try a different filename or clear your search.</p></div>
+        )}
+        {!loading && !err && kind === "screenshots" && filteredScreenshots.length > 0 && (
+          <div className="screenshot-gallery">
+            {filteredScreenshots.map((shot, index) => (
+              <article className="screenshot-card" key={shot.name}>
+                <button type="button" className="screenshot-preview-trigger" onClick={() => setSelectedScreenshot(shot)} aria-label={`Preview ${shot.name}`}>
+                  <img className="screenshot-artwork" src={shot.data_url} alt="" loading="lazy" />
+                  <span className="screenshot-preview-label">Open preview <span aria-hidden="true">↗</span></span>
+                  <span className="screenshot-index">{String(index + 1).padStart(2, "0")}</span>
+                </button>
+                <div className="screenshot-card-footer">
+                  <div className="screenshot-file-info"><b title={shot.name}>{shot.name}</b><span>PNG / JPG image</span></div>
+                  <a className="screenshot-download" href={shot.data_url} download={shot.name} aria-label={`Download ${shot.name}`} title="Download screenshot">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v9m0 0 3.5-3.5M10 11.5 6.5 8M3.5 13.5v3h13v-3" /></svg>
+                  </a>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        {!loading && !err && kind === "worlds" && worlds.length === 0 && <div className="library-empty"><div className="feature-empty-mark">02</div><h3>No worlds yet</h3><p>Worlds saved in this instance will appear here. Create a world in Minecraft to get started.</p></div>}
+        {!loading && !err && kind === "worlds" && worlds.length > 0 && filteredWorlds.length === 0 && <div className="library-empty library-empty-small"><h3>No matching worlds</h3><p>Try a different name or clear your search.</p></div>}
+        {!loading && !err && kind === "worlds" && filteredWorlds.length > 0 && (
+          <div className="world-gallery">
+            {filteredWorlds.map((world) => (
+              <article className="world-card" key={world.name}>
+                <div className="world-card-art">
+                  <img className={`world-artwork${world.icon ? "" : " is-fallback"}`} src={world.icon || CONTENT_ICONS.worlds} alt="" />
+                  <span className="world-card-badge">SINGLEPLAYER</span>
+                </div>
+                <div className="world-card-content">
+                  <div className="world-card-heading"><h3 title={world.name}>{world.name}</h3><span>{world.modified ? `Updated ${formatDate(new Date(world.modified * 1000).toISOString().slice(0, 10))}` : "Saved world"}</span></div>
+                  <button type="button" className="world-edit-button" onClick={() => void openNbt(world.name)}>
+                    <img src={ACTION_ICONS.edit} alt="" /> Edit world data <span aria-hidden="true">→</span>
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        {selectedWorld && kind === "worlds" && createPortal(
+          <div className="app-modal-backdrop world-nbt-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeNbt(); }}>
+            <section className="app-modal-card wide world-nbt-modal" role="dialog" aria-modal="true" aria-labelledby="world-nbt-title">
+              <header className="world-nbt-header">
+                <div><span className="world-nbt-eyebrow">WORLD DATA EDITOR</span><h3 id="world-nbt-title">{selectedWorld}</h3></div>
+                <button type="button" className="world-nbt-close" onClick={closeNbt} aria-label="Close NBT editor"><img src={ACTION_ICONS.close} alt="" /></button>
+              </header>
+              <div className="world-nbt-safety"><span aria-hidden="true">!</span><p>Editing NBT can break a world. Arca keeps the original as <code>level.dat.arca-backup</code> the first time you save here. Close Minecraft before editing.</p></div>
+              {nbtError && <p className="world-nbt-error" role="alert">{nbtError}</p>}
+              {nbtSaved && <p className="world-nbt-success" role="status">Saved successfully. Your backup is in this world’s save folder.</p>}
+              <label className="world-nbt-label" htmlFor="world-nbt-json">NBT data · JSON representation</label>
+              <textarea id="world-nbt-json" className="world-nbt-textarea" value={nbtText} onChange={(event) => { setNbtText(event.target.value); setNbtError(""); setNbtSaved(false); }} spellCheck={false} disabled={nbtLoading} aria-describedby="world-nbt-help" />
+              <div className="world-nbt-footer">
+                <span id="world-nbt-help">{nbtLoading ? "Reading level.dat…" : nbtText !== originalNbtText ? "Unsaved changes" : "Edit the JSON, then save to write it back to level.dat."}</span>
+                <button type="button" className="world-nbt-save" onClick={() => void saveNbt()} disabled={nbtLoading || nbtSaving || nbtText === originalNbtText}>
+                  {nbtSaving ? "Saving…" : "Save world data"}
+                </button>
+              </div>
+              <details className="world-nbt-guide">
+                <summary>Use an external NBT editor instead</summary>
+                <ol>
+                  <li>Quit Minecraft completely so the world file is not in use.</li>
+                  <li>Open this instance folder, then go to <code>saves/{selectedWorld}</code>.</li>
+                  <li>Make a separate copy of <code>level.dat</code> before changing anything.</li>
+                  <li>Open <code>level.dat</code> with a desktop NBT editor such as NBTExplorer, make your changes, and save.</li>
+                  <li>Reopen the world in Minecraft and check that it loads correctly.</li>
+                </ol>
+                <p>External tools edit the file directly and do not use Arca’s automatic backup. Keep your own copy before saving.</p>
+                <button type="button" className="world-nbt-folder" onClick={openFolder}><img src={ACTION_ICONS.folder} alt="" /> Open instance folder</button>
+              </details>
+            </section>
+          </div>,
+          getPortalRoot(),
+        )}
+        {selectedScreenshot && kind === "screenshots" && createPortal(
+          <div className="app-modal-backdrop screenshot-lightbox" onMouseDown={(event) => { if (event.target === event.currentTarget) closeScreenshot(); }}>
+            <section className="screenshot-lightbox-content" role="dialog" aria-modal="true" aria-label={`Screenshot preview: ${selectedScreenshot.name}`}>
+              <header><span title={selectedScreenshot.name}>{selectedScreenshot.name}</span><button type="button" onClick={closeScreenshot} aria-label="Close preview"><img src={ACTION_ICONS.close} alt="" /></button></header>
+              <img src={selectedScreenshot.data_url} alt={selectedScreenshot.name} />
+              <a className="screenshot-lightbox-download" href={selectedScreenshot.data_url} download={selectedScreenshot.name}>Download original</a>
+            </section>
+          </div>,
+          getPortalRoot(),
+        )}
+        {!loading && !err && kind === "playtime" && (
+          <section className="playtime-dashboard">
+            <div className="playtime-summary">
+              <article className="playtime-total-card"><span>ALL-TIME PLAYTIME</span><strong>{formatDuration(playtime.total_seconds)}</strong><p>Across this Minecraft instance</p></article>
+              <article className="playtime-stat-card"><span>LAST {chartRange} DAYS</span><strong>{formatDuration(chartTotal)}</strong><p>{chartActiveDays} active {chartActiveDays === 1 ? "day" : "days"}</p></article>
+              <article className="playtime-stat-card"><span>BEST DAY</span><strong>{chartBestDay.seconds ? formatDuration(chartBestDay.seconds) : "—"}</strong><p>{chartBestDay.date ? formatDate(chartBestDay.date) : "No sessions yet"}</p></article>
+            </div>
+            <section className="playtime-chart-card" aria-labelledby="playtime-chart-title">
+              <header className="playtime-chart-header">
+                <div><h3 id="playtime-chart-title">Playtime activity</h3><p>Your daily play sessions over time</p></div>
+                <div className="playtime-range" role="group" aria-label="Chart date range">
+                  {([7, 30, 90] as const).map((range) => <button type="button" key={range} className={chartRange === range ? "on" : ""} aria-pressed={chartRange === range} onClick={() => setChartRange(range)}>{range}D</button>)}
+                </div>
+              </header>
+              {chartActiveDays === 0 && <p className="playtime-chart-empty">Play a session in this instance to start building your tracker.</p>}
+              <div className="playtime-chart-wrap">
+                <svg className="playtime-chart" viewBox="0 0 1000 230" role="img" aria-label={`${chartRange}-day playtime chart. ${chartActiveDays} active days, ${formatDuration(chartTotal)} total.`}>
+                  <defs><linearGradient id="playtime-bar-gradient" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#b69aff" /><stop offset="100%" stopColor="#7447d5" /></linearGradient></defs>
+                  {[0, 1, 2, 3, 4].map((step) => {
+                    const y = chartPlot.top + chartPlot.height * step / 4;
+                    const axisSeconds = chartMaxSeconds * (1 - step / 4);
+                    return <g key={step}><line x1={chartPlot.left} x2={chartPlot.left + chartPlot.width} y1={y} y2={y} /><text x={chartPlot.left - 9} y={y + 3} textAnchor="end">{formatChartAxis(axisSeconds)}</text></g>;
+                  })}
+                  {chartData.map((day, index) => {
+                    const height = day.seconds ? Math.max(3, day.seconds / chartMaxSeconds * chartPlot.height) : 0;
+                    const x = chartPlot.left + index * (chartBarWidth + chartBarGap);
+                    const y = chartPlot.top + chartPlot.height - height;
+                    return <g key={day.date}><title>{`${formatDate(day.date)}: ${formatDuration(day.seconds)}`}</title><rect className={day.seconds ? "has-playtime" : ""} x={x} y={y} width={chartBarWidth} height={height} rx={Math.min(4, chartBarWidth / 2)} /></g>;
+                  })}
+                  {[0, Math.round((chartRange - 1) / 4), Math.round((chartRange - 1) / 2), Math.round((chartRange - 1) * 3 / 4), chartRange - 1].map((index) => {
+                    const x = chartPlot.left + index * (chartBarWidth + chartBarGap) + chartBarWidth / 2;
+                    return <text className="playtime-date-tick" key={index} x={x} y="218" textAnchor="middle">{formatDate(chartData[index].date)}</text>;
+                  })}
+                </svg>
+              </div>
+              <footer className="playtime-chart-footer"><span><i /> Daily playtime</span><span>{chartActiveDays} of {chartRange} days with activity</span></footer>
+            </section>
+          </section>
+        )}
         {!loading && !err && kind !== "screenshots" && kind !== "worlds" && kind !== "playtime" && items.length === 0 && (
           <div className="library-empty">
             <div className="library-empty-icon"><img src={CONTENT_ICONS[kind]} alt="" /></div>
